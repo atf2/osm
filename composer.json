@@ -1,0 +1,26 @@
+{
+    "name": "atf/osm",
+    "description": "PHP O-O interface to read OSM's (Online Scout Manager's) web API",
+    "type": "library",
+    "keywords": ["OSM", "Online", "Scout", "Manager", "API", "PHP"],
+    "authors": [
+        {
+            "name": "Andrew Fisher",
+            "email": "andrew@atf.me.uk",
+            "role": "developer"
+        }
+    ],
+    "license": "MPL-2.0",
+    "support": {
+        "email": "andrew@atf.me.uk"
+    },
+    "autoload": {
+        "psr-4": {
+            "atf\\": "src/"
+        }
+    },
+    "require": {"php": "^7"},
+    "require-dev": {
+        "phpunit/phpunit": "^9"
+    }
+}

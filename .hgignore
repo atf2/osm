@@ -1,0 +1,4 @@
+syntax: glob
+vendor/*
+composer.lock
+tests/config.tests.php
