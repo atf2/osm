@@ -47,6 +47,9 @@ class BaseObject
    * will cause an error message and an exception.
    * PHP will complain about reading undefined properties or executing undefined
    * methods, so we don't need to define a magic method for those.
+   *
+   * @param string $name  the (undeclared) property being set.
+   * @param mixed $v  the value to which the named property is being set.
    */
   public function __set( $name, $v ) {
     $trace = debug_backtrace();
@@ -56,92 +59,110 @@ class BaseObject
   }
 }
 
+/** Class giving access to information held in Online Scout Manager
+ *
+ * This class handles logging in and out of OSM, and all low-level access to
+ * OSM's API.  It also handles concerns which are global to the OSM connection,
+ * including maintaining caches of objects (such as Sections and Badges) not
+ * related to a particular lower-level object.
+ */
 class OSM extends BaseObject
 {
 	const BADGETYPE_CHALLENGE = "challenge";
 	const BADGETYPE_STAGED = "staged";
 	const BADGETYPE_ACTIVITY = "activity";
 	
-	/* @var int  Anyone using OSM through their web API must be issued an ID by
-   *           OSM support.  This property stores to API Id to be used in
-   *           accessing the API.
-	 */
+	/** The API Id to be used in accessing the API.
+   * This Id will have been issued to the developer by OSM support.
+   * @var int
+   */
 	public $apiId = 0;
 
-  /** @var Badge[]  array of badges known to this session, indexed by
-   *           combination of Badge Id and badge version.  This array is used to
-   * cache badges, avoiding the creation of multiple objects for a single badge.
+  /** Cache of badges known to this session.
+   * This cache will be checked when a badge definition is required, thus
+   * avoiding repeated API calls for the same badge definition.
+   * @var Badge[string]  array indexed by combination of Badge Id and badge version.
    */
   private $badges = array();
   
-  /** Handle used for Curl operations on OSM API
+  /** Handle used for Curl operations on OSM API.
+   * @var Object|null  A value of null indicates that no curl handle has been
+   *           created yet.
    */
   private $curlHandle = null;
 
-  /** @var Section|null  the current section in OSM.  This will be initialised to the section their
-   *           use was last using in the OSM web interface.  Changes to this will not be reflected
-   *           in the OSM web interface. */
+  /** The current section.
+   * This will be initialised to the section the user was last using in the OSM
+   * web interface.  For parents who are not leaders this will be null.
+   * @var Section|null
+   */
   private $currentSection = null;
   
-  /** @var string|null  the email used to log in to OSM, or null if not logged in. */
+  /** The email used to log in to OSM, or null if not logged in.
+   * @var string|null
+   */
   private $email = null;
-  
+
+  /** The most recent error code from an API operation.
+   * @var string
+   */   
   public $errorCode = '';
   
+  /** The most recent error message from an API operation.
+   * @var string
+   */
   public $errorMessage = '';
   
-  /** @var null|Section[]  array of sections to which the logged-in user has
-   *           leader access, or null if the API has not been interrogated (by
-   *           method Sections).  Note the sections containing the users own
-   *           children will not be included unless the user also has leader
-   *           access to those sections)
+  /** Array of sections to which the logged-in user has leader access, or null
+   * if the API has not been interrogated (by method Sections).
+   * Note the sections containing the user's own children will not be included
+   * unless the user also has leader access to those sections.
+   * @var null|Section[int]  
    */
   private $leaderSections = null;
   
-  /* @var null|Scout[]  array containing logged-in user's children, or null if
-   *           the API has not been interrogated (by method MyChildren) to
-   *           discover this.  For leaders who are not also parents this will be
-   *           an empty array. */
+  /** Array of logged-in user's children.
+   * A value of null indicates the API has not yet been interrogated (by method
+   * MyChildren) to populate this.  For leaders who are not also parents this
+   * will be an empty array.
+   * @var null|Scout[int]
+   */
   private $myChildren = null;
   
-  /** @var Section[] Array of sections known to this instance, indexed by the section identifier
-   * used by the API.  This list is not exhaustive and may be added to if method FindSection is
-   * called with the $create parameter set.
-   * Contrast with property $leaderSections.
+  /** Array of sections known to this instance, 
+   * This includes both sections to which the user has access and other sections
+   * which may have been referenced by, for instance, MyChildren or a shared
+   * event.  Contrast this with property $leaderSections.
+   * @var Section[int]   indexed by the section identifiers
    */
   private $sections = array();
 	
-	/** The API Token issued by OSM support when they first authorise use of the API.
-	 * This may be specified as a constant OSM_TOKEN or may be given as an argument to the OSM
-   * constructor.
+	/** The API Token issued (with $apiId) by OSM support when they authorise use
+   * of the API.
 	 * @var string
 	 */
 	private $token;
 	
-	/**
-	 * The user ID, obtained through authorize()
-	 * 
+	/** The user ID, issued by the API in response to a username and password,
+   * when we log in.
 	 * @var int
 	 */
 	private $userId = null;
 	
-	/**
-	 * The user secret, obtained through authorize()
-	 * 
+	/** The user secret, issued by the API in response to a username and password,
+   * when we log in.
 	 * @var string
 	 */
 	private $secret = null;
 	
-	/**
-	 * The absolute URL which all URLs are relative to.
-	 * 
+	/** The absolute URL which all URLs are relative to.
 	 * @var string
 	 */
 	private $base = 'https://www.onlinescoutmanager.co.uk/';
 	
 	/** Constructor for an OSM object which can be used to access Online Scout Manager
    *
-	 * @param number $apiid API ID, as supplied by OSM support when authorising an application.  If
+	 * @param string $apiId API ID, as supplied by OSM support when authorising an application.  If
    *           this parameter is omitted, the constant OSM_API_ID, if defined, will be used instead.
 	 * @param string $token Token, as supplied by OSM support when authorising an application.  If
    *           this parameter is omitted, the constant OSM_TOKEN, if defined, will be used instead.
@@ -172,15 +193,44 @@ class OSM extends BaseObject
 	  }
 	}
   
-  public function ClearCache() {
+	/** Fetch all terms for all accessible sections so they are available for other methods.
+   * This method should only be called from class Section.
+	 * 
+	 * @return void
+	 */
+  public function ApiGetTerms()
+  { $this->Sections();
+    $apiTerms = $this->PostAPI( 'api.php?action=getTerms' );
+    //var_dump( $apiTerms );
+    foreach ($this->sections as $section)
+    { if (isset($apiTerms->{$section->id})) $section->ApiUseGetTerms( $apiTerms->{$section->id} );
+      else $section->ApiUseGetTerms( array() );
+    }
+  }
+ 
+  /** Forget all cached information.
+   *
+   * This is used after logout to ensure we don't subsequently return objects
+   * which a new logged-in user is not entitled to see.  The only known use-case
+   * for this is during unit testing.
+   */
+  private function ClearCache() {
+    foreach ($this->sections as $section) $section->ClearCache();
+    if ($this->myChildren)
+      foreach ($this->myChildren as $scout) $scout->ClearCache();
     $this->leaderSections = null;
     $this->myChildren = null;
     $this->sections = array();
   }
 
-  /** Get the default section
+  /** Get or set the default section.
    *
-   * @return Section|null
+   * @param int|null $sectionId  the Id of the section which is to become
+   *           current, null or omitted if no change is required.
+   *
+   * @return Section|null  the current section (initially, the last section used
+   *           by the current user in the OSM user interface).  May be null if
+   *           the current user is not a leader.
   */
   public function CurrentSection( int $sectionId = null ) {
     if (!$this->sections) $this->Sections();
@@ -204,31 +254,46 @@ class OSM extends BaseObject
   }
 
   /** Finds the object representing a particular badge and version, creating the object if necessary
-   * but leaving most properties undefined. */
-  public function FindBadge( $idv ) {
+   * but leaving most properties undefined.
+   *
+   * @param string $idv  The full Id (including version) of the required badge.
+   *
+   * @return Badge  the requested Badge object.  This object will have most
+   *           properties undefined, but any attempt to read a property will
+   *           prompt an API call to attempt to populate it.
+   */
+  public function Badge( string $idv ): Badge {
     if (!isset( $this->badges[$idv] ))
       $this->badges[$idv] = new Badge( $idv );
     return $this->badges[$idv];
   }
 
-  /** Given a section Id, (creates and) returns the Section object for that section.
+  /** Finds the object representing a particular section, creating the object if
+   * necessary.
    *
-   * @param int $sectionId  the number used in OSM as the unique identifier for a section.
-   * @param bool $create  normally, this method will return an Section object if one has already
-   *           been created, or null if that section hasn't been seen on this run.  If $create is
-   *           true then an Section object will be created if necessary (although no attempt is
-   *           made to create a section in OSM itself).
+   * @param int $sectionId  the number used in OSM as the unique identifier for
+   *           a section.
    *
-   * @returns Section|null the object representing the section, or null if it was not found.
+   * @returns Section the object representing the section.  This object may
+   *           have most properties undefined, but any attempt to read a
+   *           property will prompt an API call to attempt to populate it.
    */
-  public function FindSection( int $sectionId, bool $create = false ) {
-    if (!isset( $this->sections[ $sectionId ])) {
-      if (!$create) return null;
-      $this->sections[ $sectionId ] = new Section( $this, $sectionId );
-    }
+  public function Section( int $sectionId ) {
+    if (!isset( $this->sections[$sectionId] )) {
+      $this->Sections();
+      if (!isset( $this->sections[$sectionId] )) {
+        $this->sections[ $sectionId ] = new Section( $this, $sectionId );
+    } }
     return $this->sections[ $sectionId ];
   }
 
+  /** Finds a section of a given type (beavers cubs etc).
+   *
+   * @param string $type  the required type of section.  This may be 'waiting',
+   *           'beavers', 'cubs', 'scouts', 'explorers' or 'adults'.
+   * @param int $n  when omitted, the first section found of the given type is
+   *           returned; may be used to request the 2nd, 3rd etc instead.
+   */
   public function FindSectionByType( string $type, int $n = 1 )
   { $this->Sections();
     foreach ($this->sections as $section)
@@ -239,29 +304,14 @@ class OSM extends BaseObject
     return null;
   }
   
-	/** Fetch all terms for all accessible sections so they are available for other methods.
-   * This method should only be called from class Section.
-	 * 
-	 * @return void
-	 */
-  public function InitialiseTerms()
-  { $this->Sections();
-    $apiTerms = $this->PostAPI( 'api.php?action=getTerms' );
-    //var_dump( $apiTerms );
-    foreach ($this->sections as $section)
-    { if (isset($apiTerms->{$section->id})) $section->InitialiseTerms( $apiTerms->{$section->id} );
-      else $section->InitialiseTerms( array() );
-    }
-  }
-  
 	/** Check whether we have logged in.
    *
-   * Note that this returns a login if we have (during this session, which may cover several requests)
-   * presented credentials (an email and password) and have received in return an authorisation
-   * token (userid and secret).  There is no guarantee that the token is still valid (although they
-   * seem to have long lifetimes), nor that it has permission to access anything in particular
-   * (which is determined by permissions given by the user to the application in the External Access
-   * part of Settings/My Account Details).
+   * Note that this returns a login if we have (during this session, which may
+   * cover several requests) presented credentials (an email and password) and
+   * have received in return an authorisation token (userid and secret).  There
+   * seem to have long lifetimes), nor that it has permission to access anything
+   * in particular (which is determined by permissions given by the user to the
+   * application in the External Access part of Settings/My Account Details).
 	 * 
 	 * @return string|null  the email address used to log in.
 	 */
@@ -275,15 +325,17 @@ class OSM extends BaseObject
     return count($this->Sections()) > 0;
   }
 	
-	/** 
-	 * Authorize the API with the username and password provided
+	/** Authorize the API with the username and password provided
+   *
+   * This method will always attempt to authorise the login with the OSM
+   * website.
 	 * 
 	 * @param string $email    Email address of user to authorize
 	 * @param string $password Password of the user to authorize
 	 * 
-	 * @return boolean;
+	 * @return boolean  true iff the login succeeded.
 	 */
-	public function Login( $email, $password )
+	public function Login( $email, $password ): bool
   { $apiData = $this->PostAPI( 'users.php?action=authorise',
                                   ['password'=>$password, 'email'=>$email] );
 		if (!isset($apiData->secret)) {
@@ -310,6 +362,7 @@ class OSM extends BaseObject
     unset( $_SESSION['OSM_EMAIL'] );
     unset( $_SESSION['OSM_USERID'] );
 		unset( $_SESSION['OSM_SECRET'] );
+    $this->ClearCache();
 	}
   
 	/** Make an API call to fetch information.
@@ -317,15 +370,15 @@ class OSM extends BaseObject
    * Although this method is public, it should only be used from within OSM and related classes.
 	 * 
 	 * @param string   $url       The URL to query, relative to the base URL
-	 * @param string[] $parts     The URL parts, encoded as an associative array
-	 * @param boolean  $returnErrors true iff all errors should result in an exception; otherwise
+	 * @param string[] $postArgs  The URL parts, encoded as an associative array
+	 * @param bool  $throwErrors true iff all errors should result in an exception; otherwise
    *                            certain API errors (e.g. permissions, invalid arguments etc) will
    *                            be indicated by setting the OSM errorCode and errorMessage
    *                            properties and returning a null value.
 	 * 
 	 * @return string[];
 	 */
-	public function PostAPI($url, $postArgs=array(), $throwErrors = true ) {
+	public function PostAPI( $url, $postArgs=array(), $throwErrors = true ) {
     $this->errorCode = $this->errorMessage = '';
 		if ($this->curlHandle === null) $this->curlHandle = curl_init();
   
@@ -348,9 +401,9 @@ class OSM extends BaseObject
 		curl_setopt( $this->curlHandle, CURLOPT_RETURNTRANSFER, true );
     if ( !isset( $this->apiTimes[$url] ) )
       $this->apiTimes[$url] = (object)['count'=>0, 'nano'=>0];
-    $this->apiTimes[$url]->nano -= \hrtime( true );
+    $this->apiTimes[$url]->nano -= \microtime( true );
 		$msg = curl_exec( $this->curlHandle );
-    $this->apiTimes[$url]->nano += \hrtime( true );
+    $this->apiTimes[$url]->nano += \microtime( true );
     $this->apiTimes[$url]->count += 1;
     
     if($msg === false){
@@ -360,6 +413,13 @@ class OSM extends BaseObject
     //echo htmlspecialchars( "JSON for {$this->base}$url is \"$msg\"" ), "<br/><br/>\n";
 		$out = json_decode($msg);
     // echo "Out for ", htmlspecialchars($url), " is "; var_dump( $out );
+    
+    if (isset( $_GET['traceosm'] )) {
+      if (preg_match( $_GET['traceosm'], $url )) {
+        echo "\n<h2>", htmlspecialchars( $url ), "</h2>";
+        echo "<pre>\n", json_encode( $out, JSON_PRETTY_PRINT ), "</pre>\n";
+      }
+    }
 
     if (is_object( $out )) {
       if (isset( $out->error )) {
@@ -386,13 +446,14 @@ class OSM extends BaseObject
    *
    * Although this method is public, it should only be used from within OSM and related classes.
 	 * 
-	 * @param string   $url       The URL to query, relative to the base URL
-	 * @param string[] $etArgs    The URL parts, encoded as an associative array
+	 * @param string   $url      The URL to query, relative to the base URL
+	 * @param string[] $getArgs  The URL parts, encoded as an associative array
 	 * 
 	 * @return string[];
 	 */
 	public function GetAPI($url, $getArgs=array() )
-  { if ($getArgs) $url .= '?' . http_build_query( $getArgs );
+  { assert( false, "Believed unused" );
+    if ($getArgs) $url .= '?' . http_build_query( $getArgs );
     
 		echo htmlspecialchars( "Query: {$this->base}$url" ), "<br/>\n";
 		if ($this->curlHandle === null) $this->curlHandle = curl_init();
@@ -420,9 +481,9 @@ class OSM extends BaseObject
       $t = $this->PostAPI( "ext/mymember/dashboard/?action=getNextThings" );
       if ($t && $t->data && $t->data->widget_data) {
         foreach( $t->data->widget_data as $sectionId => $children ) {
-          $section = $this->FindSection( $sectionId, true );
+          $section = $this->Section( (int) $sectionId );
           foreach ($children as $scoutId => $widgets) {
-            $this->myChildren[$scoutId] = $section->FindScout( $scoutId, true );
+            $this->myChildren[$scoutId] = $section->FindScout( (int) $scoutId );
             $this->myChildren[$scoutId]->isMyChild = true;
           }
         }
@@ -430,11 +491,13 @@ class OSM extends BaseObject
     }
     return $this->myChildren;
   }
-  
-  public function PrintAPIUsage() {
+
+  /** Print summary of API calls and time taken since OSM object was created.
+   */
+  public function PrintAPIUsage(): void {
     foreach ($this->apiTimes as $url => $a) {
-      echo number_format( $a->nano / 1000000000, 3 ),
-                                " seconds for {$a->count} calls of $url<br/>\n";
+      echo "\n", number_format( $a->nano, 3 ), " seconds for ", $a->count,
+           " calls of ", htmlspecialchars( $url ), "<br/>";
     }
   }
 
@@ -454,7 +517,7 @@ class OSM extends BaseObject
       //var_dump( $apiSections );
       if (is_array( $apiSections )) {
         foreach ($apiSections as $apiSection) {
-          $section = $this->FindSection( intval( $apiSection->sectionid ), true );
+          $section = $this->Section( intval( $apiSection->sectionid ) );
           $section->ApiUseGetUserRoles( $apiSection );
           $this->leaderSections[ $section->id ] = $section;
           if ($this->currentSection == null || $apiSection->isDefault)
@@ -464,18 +527,6 @@ class OSM extends BaseObject
     }
     return $this->leaderSections;
   }
-
-	/**
-	 * Get a list of patrols
-	 * 
-	 * @param string $sectionid The section ID returned by getTerms()
-	 * 
-	 * @return Object
-	 */
-	public function getPatrols($sectionid) {
-		$patrols = $this->PostAPI('users.php?action=getPatrols&sectionid='. $sectionid);
-    return $patrols->patrols;
-	}
 	
 	/**
 	 * List of records of the kids present in term $termid
@@ -490,6 +541,20 @@ class OSM extends BaseObject
 	}
 }
 
+/** Represents a Challenge, Activity, Staged or Core Badge.
+ *
+ * The individual requirements for a badge are represented by objects of class
+ * Requirement.
+ * The progress of a Scout towards a badge is represented by an object of type
+ * BadgeWork.
+ *
+ * @property-read string $group
+ * @property-read string $id
+ * @property-read string $name
+ * @property-read Requirement[int] $requirements
+ * @property-read string $type
+ * @property-read string $version
+ */
 class Badge extends BaseObject
 { /** @var string  badge identifier.  Not unique as a badge may exist in several versions. */
   private $id;
@@ -516,6 +581,17 @@ class Badge extends BaseObject
   const STAGED = 3;
   const CORE = 4;
   
+  /** Additional information about badges we haven't found how to get from the
+   * API.
+   * For some badges, one does not have to complete all the requirements.  For
+   * example, in the beavers' Outdoors badge only two (out of seven) elements
+   * of the first area.  This behaviour is fairly unusual, and we have not
+   * found how to get the details from the API, so we use instead this manually
+   * composed structure.
+   * @var int[][][] Array, indexed by section type.  Each element is an array,
+   *           indexed by badge name, with elements which are arrays, indexed by
+   *           area name, of integers giving the number of elements of that
+   *           area which must be completed.
   static public $rules = ['beavers'=>['Outdoors'=>['a'=>2],
                                       'Skills'=>['b'=>3,'c'=>3],
                                       'World'=>['d'=>4]
@@ -531,10 +607,23 @@ class Badge extends BaseObject
   /** @var string  version of the badge. */
   private $version;
   
+  /** Unique identifier (including version) for this Badge.
+   * @param string $idv
+   */
   public function __construct( $idv ) {
     $this->idv = $idv;
   }
-
+  
+  /** Return a virtual property of the Badge.
+   *
+   * Several private properties of the Badge are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed
+   */
   public function __get( $property ) {
     switch ($property) {
       case 'group':
@@ -550,14 +639,24 @@ class Badge extends BaseObject
     }
   }
   
-  public function __toString() {
+  /** Convert object to string (used whereever a Badge is used in a context
+   * requiring a string).
+   * @return string  simply returns the name of the badge, optionally followed
+   *           by the group name in parentheses.
+   */
+  public function __toString(): string {
     $s = $this->name;
     if ($this->group) $s .= " ({$this->group})";
     return $s;
   }
 
+  /** Populate the private properties of the badge using data returned by API
+   * call with action GetBadgeStructure in method Term::Badges.
+   *
+   * @param \stdClass $apiData  object giving properties of the badge.
+   * @param \stdClass $apiTasks object giving requirements for the badge.
+   */
   public function ApiUseGetBadgeStructure( $apiData, $apiTasks ) {
-    
     $this->id = $apiData->badge_id;
     $this->version = $apiData->badge_version;
     assert( $this->idv === $apiData->badge_identifier );
@@ -587,7 +686,16 @@ class BadgeWork {
   
   /** @var Scout  the scout who has done this badge work. */
   public $scout;
-  
+
+  /** Constructor for Badgework objects.
+   *
+   * @param Scout $scout  the scout who is attempting or has attempted the
+   *           badge.
+   * @param Badge $badge  the badge being attempted.
+   * @param \stdClass $apiItem  an element of the items array returned by an API
+   *           call (in method Term::ApiGetBadgeRecords) with action
+   *           getBadgeRecords.
+   */
   public function __construct( Scout $scout, Badge $badge, \stdClass $apiItem ) {
     assert( $scout->id == $apiItem->scoutid );
     $this->scout = $scout;
@@ -602,70 +710,78 @@ class BadgeWork {
       else $this->progress[$id] = null;
     }
   }
-  
-  public function Text( Requirement $requirement ) {
+ 
+  /** Return the text entered against a particular requirement for this scout's
+   * work towards this badge.
+   * The badge and scout concerned are given by the corresponding properties.
+   *
+   * @param Requirement $requirement  the requirement (which must be a
+   *           requirement of the badge) whose text is to be returned.
+   * @return Tstring  the text, if any, entered against the requirement for the
+   *           scout's work towards the badge.  This is the text we see in the
+   *           OSM user interface in the spreadsheet of work towards a
+   *           particular badge.  Provided the text doesn't start with an 'x'
+   *           it indicates that the requirement has been satisfied.
+   */
+  public function Text( Requirement $requirement ): string {
+    assert( $this->badge === $requirement->badge );
     if (!isset( $this->progress[$requirement->id] )) return '';
     return $this->progress[$requirement->id];
   }
 
-
-  public function HasMet( Requirement $requirement ) {
+  /** Has the specified requirement been met in this badgework (done by a
+   * specific scout towards a specific badge)?
+   *
+   * The requirement is considered met if the badge has been completed or
+   * awarded, and also if the text entered against the requirement is present
+   * and doesn't start with an 'x'.
+   * @param Requirement $requirement  the requirement to be met.  This must be
+   *           a requirement of the badge to which this badgework relates.
+   * @return bool  Whether the requirement has been met.
+   */
+  public function HasMet( Requirement $requirement ): bool {
+    assert( $this->badge === $requirement->badge );
     if ($this->completed || $this->awarded) return true;
     if (!isset( $this->progress[$requirement->id] )) return false;
     if (substr( $this->progress[$requirement->id], 0, 1 ) == 'x') return false;
     return true;
   }
   
-  /** Returns whether the given requirement can be omitted because enough other requirements in the
-   * same group have been satisfied.
+  /** Returns whether the given requirement can be omitted because enough other
+   * requirements in the same area have been satisfied.
+   * @param Requirement $requirement  the requirement to be considered.  This
+   *           must be a requirement of the badge to which this badgework
+   *           relates.
+   * @return bool  Whether the requirement can be skipped (because enough other
+   *           requirements in the same area have been met).  This is computed
+   *           without regard to whether the requirement itself has been met.
    */
-  public function CanSkip( Requirement $requirement ) {
+  public function CanSkip( Requirement $requirement ): bool {
+    assert( $this->badge === $requirement->badge );
     $sectionType = $this->scout->section->type;
-    // If we don't have a special set of rules for this section, every requirement must be met.
+    // If we don't have a special set of rules for this section, every
+    // requirement must be met.
     if (!isset( Badge::$rules[$sectionType] )) return false;
     $rules = Badge::$rules[$sectionType];
-    // If we don't have a special rule for this badge, every requirement must be met.
+    // If we don't have a special rule for this badge, every requirement must be
+    // met.
     if (!isset($rules[$this->badge->name])) return false;
     $rules = $rules[$this->badge->name];
-    // If we don't have a special rule for this requirement's group, every requirement in the group
-    // must be met.
-    if (!isset( $rules[$requirement->group] )) return false;
-    // Otherwise, count the requirements already met within this requirements group, and if there
+    // If we don't have a special rule for this requirement's area, every
+    // requirement in the area must be met.
+    if (!isset( $rules[$requirement->area] )) return false;
+    // Otherwise, count the requirements already met within this requirement's area, and if there
     // are as many as required by the special rule, we don't need to meet this requirement.
     $count = 0;
     foreach ($this->badge->requirements as $r) {
-      if ($r->group == $requirement->group && $this->HasMet( $r )) $count++;
+      if ($r->area == $requirement->area && $this->HasMet( $r )) $count++;
     }
-    return $count >= $rules[$requirement->group];
+    return $count >= $rules[$requirement->area];
   }
-  
-  /** Returns whether further work on the given requirement needs to be done by this scout.  This is
-   * the case unless the scout has completed the requirement, has completed other requirements
-   * which complete the group of requirements, or has completed or been awarded the whole badge.
-   
-  public function StillNeeds( Requirement $requirement ) {
-    if ($this->HasMet( $requirement )) return false;
-    $sectionType = $this->scout->section->type;
-    // If we don't have a special set of rules for this section, every requirement must be met.
-    if (!isset( Badge::$rules[$sectionType] )) return true;
-    $rules = Badge::$rules[$sectionType];
-    // If we don't have a special rule for this badge, every requirement must be met.
-    if (!isset($rules[$this->badge->name])) return true;
-    // If we don't have a special rule for this requirement's group, every requirement in the group
-    // must be met.
-    $rules = $rules[$this->badge->name];
-    if (!isset( $rules[$requirement->group] )) return true;
-    // Otherwise, count the requirements already met within this requirements group, and if there as
-    // as many as required by the special rule, we don't need to meet this requirement.
-    $rule = $rules[$requirement->group];
-    $count = 0;
-    foreach ($this->badge->requirements as $r) {
-      if ($r->group == $requirement->group && $this->HasMet( $r )) $count++;
-    }
-    return $count < $rules[$requirement->group];
-  } */
 }
 
+/** An Event which may be attended by one or more Scouts.
+ */
 class Event extends BaseObject
 { /** @var Section the section containing this event */
   public $section;
@@ -676,19 +792,18 @@ class Event extends BaseObject
   /** @var int a globally unique identifier for this event */
   public $id;
   
-  /** @var string[] an array of attendance strings, indexed by member Id.  Possible element values
-   *            are "", "Invited", "No", "Reserved", "Show in Parent Portal" or "Yes". */
-  private $attendance;
-  
-  /** @var Scout[] an array of members who may attend this event.  This contains the members to
-   *            which you can send invitations in OSM's web interface. */
+  /** @var Scout[int] an array of members who may attend this event.  This
+   *            contains the members to which you can send invitations in OSM's
+   *            user interface. */
   private $attendees = null;
   
-  /** @var float the cost of the event, or null if the cost is not yet determined. */
+  /** @var float|null  the cost of the event, or null if the cost is not yet
+   *  determined. */
   public $cost;
   
-  /** @var Event[]|null  array of events linked to this one by dint of being shared copies of it.
-   *            A null value indicated we haven't yet enquired whether any such events exist. */
+  /** @var Event[]|null  array of events linked to this one by dint of being
+   *            shared copies of it.  A null value indicated we haven't yet
+   *            enquired whether any such events exist. */
   private $linkedEvents = null;
   
   /** @var string the name of the event. */
@@ -736,9 +851,14 @@ class Event extends BaseObject
     $this->endDate = $apiEvent->enddate ? date_create( $apiEvent->enddate . " +1 day -1 second" ) :
                                                                                                null;
   }
-  
-  public function __toString()
-  { if ($this->startDate) return $this->name . " on " . $this->startDate->format( 'j-M-Y' );
+ 
+  /** Convert object to string (used whereever an Event is used in a context
+   * requiring a string).
+   * @return string  simply returns the name of the Event, optionally followed
+   *           by the start date in parentheses.
+   */
+  public function __toString(): string {
+    if ($this->startDate) return $this->name . " on " . $this->startDate->format( 'j-M-Y' );
     return $this->name;
   }
   
@@ -775,15 +895,23 @@ class Event extends BaseObject
                                             "&eventid={$this->id}&sectionid={$this->section->id}" );
       foreach ($apiLinks->items as $item) {
         if ($item->groupname == 'TOTAL' || $item->status != 'Accepted') continue;
-        if ($section = $this->osm->FindSection( $item->sectionid )) {
-          if ($event = $section->FindEvent( $item->eventid ) ) $this->linkedEvents[] = $event;
+        if ($section = $this->osm->Section( (int) $item->sectionid )) {
+          if ($event = $section->Event( (int) $item->eventid ) ) $this->linkedEvents[] = $event;
         }
       }
     }
     return $this->linkedEvents;
   }
-  
-  public function PopulateDetails() {
+
+  /** Calls API to get the structure of an event.
+   *
+   * Many of the basic details are populated during creation of an Event (but
+   * this may have to be re-thought in future if we start using other sources of
+   * events).
+   * This does, however, populate the $userColumns property of the event which
+   * tells us about extra columns added to the sign-up sheet.
+   */
+  public function ApiGetStructureForEvent() {
     if ($this->userColumns !== null) return;
     // The object returned by the following call has the properties below:
     // eventid   numeric string giving the event Id, which we already know.
@@ -851,15 +979,22 @@ class Event extends BaseObject
   
   /** Return the internal name equivalent to the given user-visible column name for an attendance at
    * this event.
+   * @param string $username  the user-visible name for a column added to the
+   *           attendance sheet for this event.  E.g. 'Cost' or 'T-shirt size'.
+   * @return string  the internal name used to index the column values in an
+   *           attendance.
    */
   public function UserColumn( string $username ) {
-    $this->PopulateDetails();
+    $this->ApiGetStructureForEvent();
     if (array_key_exists( $username, $this->userColumns )) return $this->userColumns[$username];
     return null;
   }
 }
 
-class EventAttendance
+/** The attendance (or otherwise) of a Scout at an Event.
+ *
+ */
+class EventAttendance extends BaseObject
 { /** @var Event  the event attended.  Note that where an event A has been shared as event B in
    *           another section, attendance at event B will be included in the attendance list for
    *           event A but will still be linked through this property to event B.
@@ -876,6 +1011,11 @@ class EventAttendance
    */
   private $columns = array();
   
+  /** @var string  giving status of this attendance (corresponds to an entry in
+   * the 'Members' tab of an Event in the OSM user interface.  Possible values
+   * are "", "Invited", "No", "Reserved", "Show in Parent Portal" or "Yes". */
+  private $status;
+  
   /** Construct an description of an attendance, including user-defined columns if present, from an
    * object returned by the API call ext/events/event/?action=getAttendance.
    *
@@ -886,7 +1026,7 @@ class EventAttendance
    */
   public function  __construct( Event $event, $apiObject )
   { $osm = $event->osm;
-    $this->scout = $event->section->FindScout( $apiObject->scoutid );
+    $this->scout = $event->section->FindScout( (int) $apiObject->scoutid );
     // Populate scout's fields from information returned by the getAttendance API call.
     $this->scout->ApiUseGetAttendance( $apiObject );
     $this->event = $event;
@@ -911,22 +1051,65 @@ class EventAttendance
   }
 }  
 
+/** A Requirement for a badge (corresponds to a column on the Badge's page in
+ *  the OSM user interface.
+ */
 class Requirement {
-  public $id;
-  public $badge;
-  public $name;
-  public $description;
-  public $group;
   
+  /** Unique Id allocated (by OSM) to this requirement.
+   * @var int
+   */
+  public $id;
+  
+  /** Badge to which this requirement relates.
+   * @var Badge
+   */
+  public $badge;
+  
+  /** Name of this requirement.
+   * This is the column heading seen in the user interface when filling in
+   * badge progress.
+   * @var string
+   */
+  public $name;
+  
+  /** Description of the requirement.
+   * This is the description offered when clicking on the (i) next to the column
+   * heading when filling in badge progress.
+   * @var string
+   */
+  public $description;
+  
+  /** Letter identifying the area into which this requirement falls.
+   *
+   * The user interface applies the same background colour to requirements in
+   * the same area.  Sometimes the scout is offerred a choice of requirements,
+   * perhaps needing to fulfil only two out of four requirements in an area.
+   * @var string
+   */
+  public $area;
+  
+  /** Constructor for a Badge Requirement.
+   *
+   * @param Badge $badge  the badge for which this is a requirement.
+   * @param \stdClass $apiField  an object returned by the API which specifies
+   *           the requirement.
+   */
   public function __construct( Badge $badge, \stdClass $apiField ) {
-    $this->id = $apiField->field;
+    var_dump( $apiField );
+    $this->id = intval( $apiField->field );
     $this->badge = $badge;
     $this->name = $apiField->name;
     $this->description = $apiField->tooltip;
-    $this->group = $apiField->module;
+    $this->area = $apiField->module;
   }
   
-  public function __toString() {
+  /** Convert object to string (used whereever a Requirement is used in a
+   * context requiring a string).
+   * @return string  simply returns a phrase of the form "{requirement} for
+   *           {badge} badge.
+   */
+  public function __toString(): string {
     return $this->name . ' for ' . $this->badge->name . ' badge';
   }
 }
@@ -947,28 +1130,47 @@ class Scout extends BaseObject
    * data we are not authorised to see. */
   private $apiGotIndividual = false;
 
-  /** @var BadgeWork[] array of objects (indexed by badge id & version) showing the progress
+  /** @var BadgeWork[string] array of objects (indexed by badge id & version) showing the progress
    *            made by this scout towards various badges.  This array will be populated as required
    *            during calls to method BadgeWork.
    */
   private $badgeWork = array();
 
+  /** @var \stdClass|null  The custom data for a scout.  This will contain
+   *           things like email, telephone and address data for contacts as
+   *           well as additional data like medical and consent records.  Will
+   *           be null if the API has not yet been interrogated for these data.
+   */
   private $customData = null;
   
-  /** @var Date  Date of birth.  Accessible via __get method which will query the API to populate
+  /** @var Date|null  Date of birth.  Accessible via __get method which will query the API to populate
    *  this and other properties if access is attempted. */
   private $dob = null;
-  
-  private $dateStartedSection;
-  
+
+  /** @var Date|null  Date this scout started in the section.
+   */
+  private $dateStartedSection = null;
+
+  /** @var string|null  First name of scout.  Null indicates the API has not yet
+   *           been interrogated to discover this.
+   */
   private $firstName = null;
-  
+
+  /** @var int  Unique id of scout.
+   *
+   * Note that two Scout objects may exist in different sections with the same
+   * id in the case that the same person is a scout in two sections.
+   */
   public $id;
 
-  /* @var bool true iff this scout is one of the logged-in users children accessible through
-   * 'My Children' in the standard OSM interface. */
+  /** @var bool true iff this scout is one of the logged-in users children
+   *  accessible through 'My Children' in the standard OSM interface.
+   */
   public $isMyChild = false;
 
+  /** @var string|null  Last name of scout.  Null indicates the API has not yet
+   *           been interrogated to discover this.
+   */
   private $lastName = null;
   
   /** @var OSM the OSM object used to access this event */
@@ -980,24 +1182,26 @@ class Scout extends BaseObject
    */
   private $patrolId = null;
   
-  /** @var integer  the section in which this scout is a member.  If the same person is a member in
-   * two sections (either simultaneously or sequentially) they should be represented by two Scout
-   * objects having the same scoutId but different sections.
-   * Of course, if the person has been set up independently in the two sections, rather than being
-   * shared between them, the scoutIds will also differ.
+  /** @var integer  the section in which this scout is a member.  If the same
+   * person is a member in two sections (either simultaneously or sequentially)
+   * they should be represented by two Scout objects having the same scoutId but
+   * different sections.  Of course, if the person has been set up independently
+   * in the two sections, rather than being shared between them, the scoutIds
+   * will also differ.
    */
   public $section;
 
   /** Construction function for Scout
    *
-   * @param Section $osm  the section to which this scout is attached.
-   * @param int $scoutId  the unique id of the scout.  Note that although this id is unique to the
-   *           scout it may be shared by several Scout objects representing the same scout in
-   *           different sections.
+   * @param Section $section  the section to which this scout is attached.
+   * @param int $scoutId  the unique id of the scout.  Note that although this
+   *           id is unique to the scout it may be shared by several Scout
+   *           objects representing the same scout in different sections.
    *
-   * @return Scout Note that the scout as returned has almost no properties set.  If further
-   *           information about the scout is available it should be added by calling one of the
-   *           Api... methods depending upon which API was used to discover the scout.
+   * @return Scout Note that the scout as returned has almost no properties set.
+   *           If further information about the scout is available it should be
+   *           added by calling one of the Api... methods depending upon which
+   *           API was used to discover the scout.
    */
   public function __construct( Section $section, int $scoutId ) {
     $this->section = $section;
@@ -1005,6 +1209,16 @@ class Scout extends BaseObject
     $this->id = $scoutId;
   }
 
+  /** Return a virtual property of the Scout.
+   *
+   * Several private properties of the Scout are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed
+   */
   public function __get( $property ) {
     switch ($property) {
       case 'dateStartedSection':
@@ -1016,20 +1230,27 @@ class Scout extends BaseObject
       case 'patrolId':
         return $this->getPatrolId();
       case 'customData':
-       if ($this->customData === null) $this->ApiCustomData();
+       if ($this->customData === null) {
+             $this->ApiCustomData();
+       }
        return $this->customData;
       default:
         throw new \Exception( "Scout->$property not found" );
     }
   }
-  
+
+  /** Convert object to string (used wherever a Scout is used in a context
+   * requiring a string).
+   * @return string  simply returns the name of the scout, if available,
+   *           otherwise returns id in the form "Scout {id}".
+   */
   public function __toString()
   { if ($this->firstName === null) return "Scout {$this->id}";
     return $this->Name();
   }
 
-  /** Fetches custom data about the member.  This includes the member's contact details, together
-   * with their primary, secondary and emergency contacts etc.
+  /** Fetches custom data about the member.  This includes the member's contact
+   * details, together with their primary, secondary and emergency contacts etc.
    */
   private function ApiCustomData()
   { if ($this->customData !== null) return;
@@ -1068,7 +1289,7 @@ class Scout extends BaseObject
 
   /** Populate properties of the scout supplied by API call GetAttendance.
    *
-   * @param object $apiObject  an object returned by the API containing basic information about the
+   * @param \stdClass $apiObject  an object returned by the API containing basic information about the
    *           member.  We take a particular interest in its following properties:
    *           scoutid string giving unique id for this member.  Provided the member has been moved
    *                     or shared between sections (rather than have data re-entered) this id will
@@ -1077,62 +1298,62 @@ class Scout extends BaseObject
    *           lastname string
    *           patrolid  numeric string identifying the scout's patrol.  The leaders patrol always
    *                     has id -2.
-   * @param int $section the section in which this scout is a member.
    */
   public function ApiUseGetAttendance( \stdClass $apiObject ) {
-    // echo "<h2>Scout {$this->id} -&gt;ApiUseGetAttendance</h2>\n"; var_dump( $apiObject );
     assert( $this->id == $apiObject->scoutid );
     $this->firstName = $apiObject->firstname;
     $this->lastName = $apiObject->lastname;
     $this->patrolId = $apiObject->patrolid;
   }
   
+  /** Populate details of a scout and his badge work using the result of an API
+   * call GetBadgeRecords.
+   *
+   * @param Badge $badge  the badge to which the data relate.
+   * @param \stdClass $apiItem  the object returned by the API.
+   */
   public function ApiUseGetBadgeRecords( Badge $badge, \stdClass $apiItem ) {
     $this->SetName( $apiItem->firstname, $apiItem->lastname );
     $this->badgeWork[$badge->idv] = new BadgeWork( $this, $badge, $apiItem );
-    // echo "Scout $this, work for badge $badge ({$badge->idv})<br/>\n"; var_dump( $this->badgeWork[$badge->idv] );
   }
   
-  /* Make a call to API post ext/members/contact/?action=getIndividual and use the result to
+  /** Make a call to API post ext/members/contact/?action=getIndividual and use the result to
    * populate properties of the scout.
-   *
-   * @param Section $section  the section the scout is in.  If this parameter is not given then
-   *           OSM's current default section will be assumed.
-   *
-   * scoutid  will match existing
-   * firstname should match existing
-   * lastname should match existing
-   * photo_guid  used somehow to construct the URL of a photo for this scout.  Not used at present.
-   * email1, 2, 3 & 4  appear to be always the empty string.
-   * phone1, 2, 3 & 4  appear to be always the empty string.
-   * address & address2  appear to be always the empty string
-   * dob       date of birth in form 'YYYY-MM-YY'.  Not used at present.
-   * started   date joined scouting movement, in form 'YYYY-MM-DD'.  Not used at present.
-   * joining_in_yrs seems to be zero even for people who have been a member for several years (and
-   *           have the joining in badges showing in OSM).
-   * parents, notes, medical, religion, school, ethnicity, subs, custom1, custom2, custom3, custom4,
-   *           custom5, custom6, custom7, custom8, custom9  all appear to be always the empty string.
-   * created_date  date and time this record was created, in the form 'YYYY-MM-DD HH:MI:SS'.
-   * last_accessed date and time this record was last access, in the form 'YYYY-MM-DD HH:MI:SS'.  It
-   *           is not quite clear what constitutes 'access'.  Not used at present.
-   * patrolid  the id of the patrol in which this scout is a member.  Patrols are specific to a
-   *           section, except id '-2' which is the leaders patrol in all sections.
-   * patrolleader small integer indicating role in patrol: 0=>member, 1=>second; 2=>sixer.  Not used
-   *           at present.
-   * startedsection   date joined this section, in form 'YYYY-MM-DD'.
-   * enddate   date left this section, in form 'YYYY-MM-DD', or null if this isn't yet known.
-   * age       narrative string such as '10 years and 5 months'.  This is the age at the time of the
-   *           query, not at the time of any event or term.
-   * age_simple  as age, but in shorter form such as '10 / 05'.
-   * sectionid the id of the section to which this record relates.  Should be the same as the id of
-   *           the related section object.
-   * active    meaning not quite certain.  A value of true may indicate the scout is still (at the
-   *           time of enquiry) a member is this section, or perhaps in any section.
-   * meetings  a number which may be a count of total meetings attended.  This property is absent if
-   *           the enquiry did not include a term.
    */
-
   public function ApiGetIndividual() {
+    /* The API call will return an object with the following properties:
+    * scoutid  will match existing
+    * firstname should match existing
+    * lastname should match existing
+    * photo_guid  used somehow to construct the URL of a photo for this scout.  Not used at present.
+    * email1, 2, 3 & 4  appear to be always the empty string.
+    * phone1, 2, 3 & 4  appear to be always the empty string.
+    * address & address2  appear to be always the empty string
+    * dob       date of birth in form 'YYYY-MM-YY'.  Not used at present.
+    * started   date joined scouting movement, in form 'YYYY-MM-DD'.  Not used at present.
+    * joining_in_yrs seems to be zero even for people who have been a member for several years (and
+    *           have the joining in badges showing in OSM).
+    * parents, notes, medical, religion, school, ethnicity, subs, custom1, custom2, custom3, custom4,
+    *           custom5, custom6, custom7, custom8, custom9  all appear to be always the empty string.
+    * created_date  date and time this record was created, in the form 'YYYY-MM-DD HH:MI:SS'.
+    * last_accessed date and time this record was last access, in the form 'YYYY-MM-DD HH:MI:SS'.  It
+    *           is not quite clear what constitutes 'access'.  Not used at present.
+    * patrolid  the id of the patrol in which this scout is a member.  Patrols are specific to a
+    *           section, except id '-2' which is the leaders patrol in all sections.
+    * patrolleader small integer indicating role in patrol: 0=>member, 1=>second; 2=>sixer.  Not used
+    *           at present.
+    * startedsection   date joined this section, in form 'YYYY-MM-DD'.
+    * enddate   date left this section, in form 'YYYY-MM-DD', or null if this isn't yet known.
+    * age       narrative string such as '10 years and 5 months'.  This is the age at the time of the
+    *           query, not at the time of any event or term.
+    * age_simple  as age, but in shorter form such as '10 / 05'.
+    * sectionid the id of the section to which this record relates.  Should be the same as the id of
+    *           the related section object.
+    * active    meaning not quite certain.  A value of true may indicate the scout is still (at the
+    *           time of enquiry) a member is this section, or perhaps in any section.
+    * meetings  a number which may be a count of total meetings attended.  This property is absent if
+    *           the enquiry did not include a term.
+    */
     if (!$this->apiGotIndividual) {
       $this->apiGotIndividual = true;
       $apiData = $this->osm->PostAPI( "ext/members/contact/?action=getIndividual&context=members" .
@@ -1148,21 +1369,24 @@ class Scout extends BaseObject
     } }
   }
 
-  /* Populate properties using the information in an element of the items array returned by API post
-   * ext/members/contact/?action=getListOfMembers for a section in a particular term.
+  /** Populate properties using the information in an element of the items array
+   * returned by API post ext/members/contact/?action=getListOfMembers for a
+   * section in a particular term.
    *
-   * firstname should match existing
-   * lastname  should match existing
-   * photo_guid  not currently used
-   * patrolid  id number of scout's patrol in their section (-2 for leaders).  Should match
+   * @param \stdClass $apiItem  the object returned by the API.  This object
+   *           will have the following properties:
+   * * firstname should match existing
+   * * lastname  should match existing
+   * * photo_guid  not currently used
+   * * patrolid  id number of scout's patrol in their section (-2 for leaders).  Should match
    *           existing.
-   * name of patrol  e.g. 'Blue 6er'.  Not currently used.
-   * sectionid id number of scout's section.  Should match existing.
-   * enddate   date scout left this section (but may have moved to another section).
-   * age       e.g. '10 / 5'.  Not used, but can be derived from date of birth.
-   * patrol_role_level_label  e.g. 'Sixer'.  Not currently used.
-   * active    boolean.  Not currently used.
-   * scoutid   will match existing
+   * * name of patrol  e.g. 'Blue 6er'.  Not currently used.
+   * * sectionid id number of scout's section.  Should match existing.
+   * * enddate   date scout left this section (but may have moved to another section).
+   * * age       e.g. '10 / 5'.  Not used, but can be derived from date of birth.
+   * * patrol_role_level_label  e.g. 'Sixer'.  Not currently used.
+   * * active    boolean.  Not currently used.
+   * * scoutid   will match existing
    */
   public function ApiUseGetListOfMembers( \stdClass $apiItem ) {
     $this->firstName = $apiItem->firstname;
@@ -1172,10 +1396,12 @@ class Scout extends BaseObject
     assert( $this->id == $apiItem->scoutid );
   }
 
-  /* What progress is this scout making towards a particular badge?
+  /** What progress is this scout making towards a particular badge?
    *
-   * @returns BadgeWork | null  An object showing the the progress this scout is making towards
-   *           the specified badge, or null if no such progress is recorded.
+   * @param Badge $badge  the badge to interrogate.
+   * @returns BadgeWork | null  An object showing the the progress this scout is
+   *           making towards the specified badge, or null if no such progress
+   *           is recorded.
    */
   public function BadgeWork( $badge ) {
     if (!array_key_exists( $badge->idv, $this->badgeWork )) {
@@ -1184,35 +1410,72 @@ class Scout extends BaseObject
     }
     return $this->badgeWork[$badge->idv];
   }
-  /** Can this scout skip the given requirement because enough other requirements in the same group
-   * have been satisfied?
+
+  /** Can this scout skip the given requirement because enough other
+   * requirements in the same area have been satisfied?
    *
-   * @param $requirement  the requirement about which we are enquiring
+   * @param Requirement $requirement  the requirement about which we are enquiring
    *
-   * @return true iff more work is needed.  Note that no work is needed if the badge has been
-   *           completed or awarded, if the work has been done, or if sufficient other work in the
-   *           same group of requirements has been done (this last only for some badges).  False
-   *           otherwise.
+   * @return bool true iff more work is needed.  Note that no work is needed if the
+   *           badge has been completed or awarded, if the work has been done,
+   *           or if sufficient other work in the same group of requirements has
+   *           been done (this last only for some badges).  False otherwise.
    */
   public function CanSkip( Requirement $requirement ) {
     $work = $this->BadgeWork( $requirement->badge );
     if ($work) return $work->CanSkip( $requirement );
     return false;
   }
-  
+
+  /** Return the contents of a field within a particular contact.
+   *
+   * @param string $contactName  The name of the contact from which we wish to
+   *           read.  This can be one of:
+   *
+   *           $contactName           | refers to...
+   *           ---------------------- | -----------------------
+   *           contact_primary_member | Member
+   *           contact_primary_1      | Primary Contact
+   *           contact_primary_2      | Primary Contact 2
+   *           emergency              | Emergency Contact
+   *           standard_fields        | Essential Information
+   *           customisable_data      | Additional Information
+   *           floating               | Additional
+   *           consents               | Consents
+   *
+   * @param string $fieldName  The name of the field we want from the given
+   *           contact.  Not all contacts have the same field names (e.g. Member
+   *           doesn't have forename or surname as they are part of the basic
+   *           scout data.  Some common fields are: last_updated_time,
+   *           last_updated_by, lastname, address1, address2, address3,
+   *           address4, postcode, email1, email2, phone1 and phone2
+   */
   public function ContactData( $contactName, $fieldName )
   { $this->ApiCustomData();
     if (!isset( $this->customData->{$contactName} )) return null;
     if (!isset( $this->customData->{$contactName}->$fieldName)) return null;
     return $this->customData->{$contactName}->$fieldName;
   }
-  
+
+  /** Returns an email for a given contact.
+   *
+   * @param \stdClass $contact  an object giving the data associated with a
+   *            particular contact of this scout.
+   * @return string|null  An email address for the given contact, or null if no
+   *           email was found (or the contact itself was null).
+   */   
   public function ContactEmail( $contact )
   { if (!$contact) return null; 
     if ($contact->email1) return $contact->email1;
     return $contact->email2;
   }
-  
+
+  /** Returns a contact name for the given scout.
+   *
+   * @return string  A best guess as to a suitable contact name for the scout.
+   *           For an adult scout this will be the scout's own name; otherwise
+   *           it will be a primary contact name if possible.
+   */   
   public function ContactName() {
     if ($this->IsAdult()) return $this->Name();
     $contact = $this->PreferredContact();
@@ -1244,7 +1507,14 @@ class Scout extends BaseObject
     }
     return $this->ContactEmail( $preferred );
   }
-  
+
+  /** The id of the scout's patrol.
+   *
+   * If the patrolId is not known the API will be interrogated to find it.
+   *
+   * @return int  the patrolId for this scout.  An Id of -2 indicates the Scout
+   *           is in the section's special 'leaders' patrol.
+   */
   private function getPatrolId() {
     if ($this->patrolId === null) $this->ApiGetIndividual();
     return $this->patrolId;
@@ -1281,40 +1551,22 @@ class Scout extends BaseObject
     if ($work) return $work->HasMet( $requirement );
     return false;
   }
-  /** Does this scout require more work on this requirement?
-   *
-   * @param $requirement  the requirement about which we are enquiring
-   *
-   * @return true iff more work is needed.  Note that no work is needed if the badge has been
-   *           completed or awarded, if the work has been done, or if sufficient other work in the
-   *           same group of requirements has been done (this last only for some badges).  False
-   *           otherwise.
-  public function StillNeeds( Requirement $requirement ) {
-    $work = $this->BadgeWork( $requirement->badge );
-    if ($work) return $work->StillNeeds( $requirement );
-    return true;
-  } */
 
-  /** The text associated with this scout's work towards this requirement.
+  /** Is this scout an adult?
    *
-   * @param $requirement  the requirement about which we are enquiring.
-   *
-   * @returns the text recorded for this scout against the given requirement.  Returns an empty
-   *           string if nothing has been recorded.
+   * @returns bool  true iff this scout is an adult (i.e. in the leaders patrol
+   *           or in an adult section.
    */
-  public function RequirementText( Requirement $requirement ) {
-    $work = $this->BadgeWork( $requirement->badge );
-    if ($work) return $work->Text( $requirement );
-    return '';
-  }
-
   public function IsAdult()
-  { //echo "{$this->Name()} is in patrol {$this->getPatrolId()} section type {$this->section->type}<br/>\n";
-    if ($this->getPatrolId() == -2) return true;
+  { if ($this->getPatrolId() == -2) return true;
     if ($this->section->type == 'adults') return true;
     return false;
   }
   
+  /** Full name of scout.
+   *
+   * @returns string  Full name (first and last names, separated by a space).
+   */
   public function Name()
   { return $this->firstName . ' ' . $this->lastName;
   }
@@ -1332,6 +1584,12 @@ class Scout extends BaseObject
     return $this->Name();
   }
 
+  /** The preferred contact for the scout.
+   *
+   * @return \stdClass|null  returns one of the primary contacts.  The method
+   *           will prefer a contact with an email and, other things being
+   *           equal, will prefer the first primary contact.
+   */
   public function PreferredContact()
   { $this->ApiCustomData();
     if ($this->IsAdult()) {
@@ -1345,10 +1603,25 @@ class Scout extends BaseObject
     return $this->customData->contact_primary_1 ?? null;
   }
 
+  /** The text associated with this scout's work towards this requirement.
+   *
+   * @param $requirement  the requirement about which we are enquiring.
+   *
+   * @returns the text recorded for this scout against the given requirement.  Returns an empty
+   *           string if nothing has been recorded.
+   */
+  public function RequirementText( Requirement $requirement ) {
+    $work = $this->BadgeWork( $requirement->badge );
+    if ($work) return $work->Text( $requirement );
+    return '';
+  }
+
   /** Set the scout's first and last names.
    *
    * This method cannot be used to change the scout's name, simply to set it after an API call that
    * may be the first reference to the scout.
+   * @param string $firstName
+   * @param string $lastName
    */
   public function SetName( $firstName, $lastName ) {
     assert( !$this->firstName || $this->firstName == $firstName );
@@ -1358,6 +1631,12 @@ class Scout extends BaseObject
   }
 }
 
+/** A section within a group.
+ *
+ * The amount of information actually available about a section will depend upon
+ * the permissions granted (by OSM) to the current user.  In particular,
+ * a parent may have access to no more than the Id of a section.
+ */
 class Section extends BaseObject
 { /** @var boolean  true iff we have populated only the most basic properties of the section. */
   private $skeleton;
@@ -1403,7 +1682,7 @@ class Section extends BaseObject
   /** @var $type string The type (waiting, beavers, cubs, scouts or adults) of the section. */
   private $type;
 
-  /* @var \stdClass|null  Object having properties defining the permissions of the logged-in user in
+  /** @var \stdClass|null  Object having properties defining the permissions of the logged-in user in
    * various areas of OSM.  Note these permissions may not be valid through the API (cf.
    * $apiPermissions).  A null value indicates we have not interrogated the API to discover the
    * permissions. */
@@ -1413,7 +1692,7 @@ class Section extends BaseObject
    * 
    * This constructor (and 'new Section') should be called only from class OSM.
    *
-   * @param $osm    the OSM object used to create this section.
+   * @param OSM $osm    the OSM object used to create this section.
    * @param int $sectionId  the unique identifier of the section
   */
   public function __construct( OSM $osm, int $sectionId ) {
@@ -1421,6 +1700,16 @@ class Section extends BaseObject
     $this->id = $sectionId;
   }
 
+  /** Return a virtual property of the Section.
+   *
+   * Several private properties of the Section are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed
+   */
   public function __get( $property ) {
     switch ($property) {
       case 'groupId':
@@ -1434,62 +1723,66 @@ class Section extends BaseObject
     }
   }
   
-  public function __toString()
+   /** Convert object to string (used wherever a Section is used in a context
+   * requiring a string).
+   * @return string  simply returns the name of the section.
+   */
+ public function __toString()
   { return $this->name;
   }
 
   /** Populate properties of this section using information from a call to
    * api.php?action=getUserRoles.
    *
-   * @param \stdClass $apiObj  one of the objects returned by the API call.  See below for a detailed
-   *           description.
+   * @param \stdClass $apiObj  one of the objects returned by the API call.  See
+   *           below for a detailed description.
    *
    * @return void
    */
-  /* The parameter will have the following properties:
-     groupname string giving the name of the group containing the section
-     groupid   numeric string identifying the group.  This is the same for all sections
-               within the same group but no further use within the API is known.
-     sectionid numeric string identifying the section.  Appears to be globally unique.
-     sectionname string giving name of section, as shown in OSM interface.
-     section   string identifying the section age-group.  Values seen are 'adults',
-               'beavers', 'cubs', 'scouts' and 'waiting'.
-     isDefault string '0' or '1'.  Exactly one of the sections returned will have value
-               '1': the section last used in the OSM web interface.
-     permissions   an object describing the permission levels for the current user in the section.
-               See the description of method Permission for details of the property names and
-               permitted values.  An absent property should be treated as zero.
-     regdate   string of form YYYY-MM-DD giving the date on which the section was first
-               registered in OSM.
-     sectionConfig an object (see below) giving information mainly related to the level of
-                subscription paid for.
-   The sectionConfig object has the following properties:
-     subscription_level  integer: 1=>Bronze, 2=>Silver, 3=>Gold
-     subscription_expires string of form YYYY-MM-DD giving expiry date of current
-                subscription.
-     section_type  string apparently identical to the 'section' property of the section.
-     sectionType  string apparently identical to the 'section' property of the section.
-     parentSectionId  the only value observed is '0'.
-     hasUsedBadgeRecords  boolean.
-     subscription_active  boolean.  Note this may relate to automatic renewal being active
-               rather than to the subscription actually being current.
-     subscription_lastExpires string of form YYYY-MM-DD.  Semantics unclear.
-     trial     an object, purpose unknown.  This property is not always present.
-     portal    an object with five integer properties specifying which parent portal options
-               have been purchased.  1=>yes, 0=>no for events, programme, badges,
-               (personal) details and emailbolton (for the Email system).  Two further
-               properties 'emailAddress' and 'emailAddressCopy' give the from address and
-               address for copies of all emails.
-     portalExpires an object with five string properties, with names like the integer
-               properties of portal, containing the expiry dates of the parent portal
-               subscriptions, together with five integer properties, named as the others
-               but with an 'A' appended, whose purpose is unknown.
-     meeting_day  string giving the three-letter name of the section's usual meeting day.
-               E.g. 'Thu'.  This doesn't seem to be editable in the web interface.
-     config_subscriptions_checked  string of form YYYY-MM-DD which appears usually to be
-               set to today's date.
-  */
   public function ApiUseGetUserRoles( \stdClass $apiObj ) {
+    /* The parameter will have the following properties:
+       groupname string giving the name of the group containing the section
+       groupid   numeric string identifying the group.  This is the same for all sections
+                 within the same group but no further use within the API is known.
+       sectionid numeric string identifying the section.  Appears to be globally unique.
+       sectionname string giving name of section, as shown in OSM interface.
+       section   string identifying the section age-group.  Values seen are 'adults',
+                 'beavers', 'cubs', 'scouts' and 'waiting'.
+       isDefault string '0' or '1'.  Exactly one of the sections returned will have value
+                 '1': the section last used in the OSM web interface.
+       permissions   an object describing the permission levels for the current user in the section.
+                 See the description of method Permission for details of the property names and
+                 permitted values.  An absent property should be treated as zero.
+       regdate   string of form YYYY-MM-DD giving the date on which the section was first
+                 registered in OSM.
+       sectionConfig an object (see below) giving information mainly related to the level of
+                  subscription paid for.
+     The sectionConfig object has the following properties:
+       subscription_level  integer: 1=>Bronze, 2=>Silver, 3=>Gold
+       subscription_expires string of form YYYY-MM-DD giving expiry date of current
+                  subscription.
+       section_type  string apparently identical to the 'section' property of the section.
+       sectionType  string apparently identical to the 'section' property of the section.
+       parentSectionId  the only value observed is '0'.
+       hasUsedBadgeRecords  boolean.
+       subscription_active  boolean.  Note this may relate to automatic renewal being active
+                 rather than to the subscription actually being current.
+       subscription_lastExpires string of form YYYY-MM-DD.  Semantics unclear.
+       trial     an object, purpose unknown.  This property is not always present.
+       portal    an object with five integer properties specifying which parent portal options
+                 have been purchased.  1=>yes, 0=>no for events, programme, badges,
+                 (personal) details and emailbolton (for the Email system).  Two further
+                 properties 'emailAddress' and 'emailAddressCopy' give the from address and
+                 address for copies of all emails.
+       portalExpires an object with five string properties, with names like the integer
+                 properties of portal, containing the expiry dates of the parent portal
+                 subscriptions, together with five integer properties, named as the others
+                 but with an 'A' appended, whose purpose is unknown.
+       meeting_day  string giving the three-letter name of the section's usual meeting day.
+                 E.g. 'Thu'.  This doesn't seem to be editable in the web interface.
+       config_subscriptions_checked  string of form YYYY-MM-DD which appears usually to be
+                 set to today's date.
+  */
     assert( $this->id == intval( $apiObj->sectionid ) );
     $this->groupId = $apiObj->groupid;
     $this->groupName = $apiObj->groupname;
@@ -1500,7 +1793,7 @@ class Section extends BaseObject
 
   /** Fetch list of Events for this section
    *
-   * @return Event[]
+   * @return Event[int]
    */
   public function Events() {
     if ($this->events === null) {
@@ -1514,21 +1807,16 @@ class Section extends BaseObject
     }
     return $this->events;
   }
-  
-  public function FindEvent( int $eventId )
+
+  /** Find the event with the given Id
+   *
+   * @param int $eventId  the id of the required event.
+   * @return Event|null  the desired Event provided it is an event in this
+   *           section; otherwise null.
+   */
+  public function Event( int $eventId )
   { $this->Events();
-    return isset( $this->events[$eventId] ) ? $this->events[$eventId] : null;
-  }
-    
-  
-  public function FindEventByDate ( string $date ) {
-    $events = $this->Events();
-    $dateObj = date_create( $date );
-    foreach ($events as $event) {
-      if ($event->startDate == null || $dateObj == null) return null;
-      if ($event->startDate->format( 'Y-m-d' ) == $dateObj->format( 'Y-m-d' )) return $event;
-    }
-    return null;
+    return $this->events[$eventId] ?? null;
   }
   
   /** Returns the object representing a particular scout in this section.
@@ -1564,20 +1852,35 @@ class Section extends BaseObject
   
   /** Initialise the list of terms for this section
    *
-   * This method should be called only from the InitialiseTerms method of class OSM.
+   * This method should be called only from the ApiGetTerms method of class OSM.
    * @param \stdClass[] $apiTerms  an array of objects, each having properties copied from the JSON
    *           returned from the API.
   */
-  public function InitialiseTerms( array $apiTerms )
+  public function ApiUseGetTerms( array $apiTerms )
   { $this->terms = array();
     foreach ($apiTerms as $apiTerm)
     { $this->terms[] = new Term( $this, $apiTerm );
     }
   }
-  
+
+  /** Return the OSM object which created this Section.
+   *
+   * @return OSM
+   */  
   public function OSM() {
     return $this->osm;
   }
+
+	/** Get a list of patrols in this section.
+	 * 
+	 * @return Object
+	 */
+	public function Patrols() {
+		assert( false, "Not implemented yet" );
+    $patrols = $this->PostAPI( 'users.php?action=getPatrols&sectionid='. $this->id );
+    // alternatively, think about using:
+    // ext/settings/patrols/?action=get&sectionid=36850
+	}
 
   /** Returns level of permission the logged-in user has for the given section.
    *
@@ -1630,8 +1933,12 @@ class Section extends BaseObject
     return array();
   }
 
+  /** Returns all the terms defined for this section.
+   *
+   * @return Term[int]
+   */
   public function Terms()
-  { if ($this->terms === null) $this->osm->InitialiseTerms();
+  { if ($this->terms === null) $this->osm->ApiGetTerms();
     if ($this->terms === null) $this->terms = array();
     return $this->terms;
   }
@@ -1723,6 +2030,12 @@ class Section extends BaseObject
   }
 }
 
+/** A Term for a particular section
+ *
+ * Many API calls require that a Term be specified to allow results to be
+ * limited to those valid at a particular time.  Most obviously, a section's
+ * membership will vary depending upon which term you are asking about.
+ */
 class Term extends BaseObject
 { /** @var bool[]  array, indexed by badge id & version, indicating whether the GetBadgeRecords API
    *            call has been made for the relevant badge.  This call will fetch details of progress
@@ -1734,8 +2047,17 @@ class Term extends BaseObject
    * defined, is an array containing the badges of that type available in the term. */
   private $badges = array();
 
+  /** @var Date  last day of term.  Users are recommended to set this so
+   * that no gap is left between the end of one term and the start of the next,
+   * but this is not a requirement.  It is also permitted to have overlapping
+   * terms.  The value will have a time part of zero, although the term is
+   * considered to last until the end of the given day.
+   */
   public $endDate;
 
+  /** @var int  Unique Id for the term.  These are globally unique across all
+   * sections, although each term relates only to a single section.
+   */
   public $id;
 
   /** @var string Name of term */
@@ -1751,12 +2073,17 @@ class Term extends BaseObject
   /** @var Section the section for which this is a term */
   public $section;
 
+  /** @var Date  first day of term.  Users are recommended to set this so
+   * that no gap is left between the end of one term and the start of the next,
+   * but this is not a requirement.  It is also permitted to have overlapping
+   * terms.
+   */
   public $startDate;
   
   /** Object constructor (should be called only from OSM class)
    *
    * @param Section $section the section to which this term belongs
-   * @param $apiTerm an object with properties describing the OSM term to be created.  This object
+   * @param \stdClass $apiTerm an object with properties describing the OSM term to be created.  This object
    *           will typically have been created by decoding the JSON response of an OSM API call and
    *           will have the following attributes (attributes described below as numbers are
    *           returned in the JSON as strings):
@@ -1778,6 +2105,10 @@ class Term extends BaseObject
     $this->endDate = date_create( $apiTerm->enddate );
   }
   
+   /** Convert object to string (used wherever a Term is used in a context
+   * requiring a string).
+   * @return string  simply returns the name of the term.
+   */
   public function __toString()
   { return $this->name;
   }
@@ -1793,7 +2124,7 @@ class Term extends BaseObject
       // echo "<h2>$this ApiGetListOfMembers</h2>\n"; var_dump( $r );
       if ($r) {
         foreach ($r->items as $apiItem ) {
-          $scout = $this->section->FindScout( $apiItem->scoutid );
+          $scout = $this->section->FindScout( (int) $apiItem->scoutid );
           $scout->ApiUseGetListOfMembers( $apiItem );
          $this->scouts[$scout->id] = $scout;
         }
@@ -1822,7 +2153,14 @@ class Term extends BaseObject
     return $this->badges[$type];
   }
 
-
+  /** Call API to get details of work towards a particular badge for all scouts
+   * in this term.
+   *
+   * On return, all scouts in this term will have progress towards the given
+   * badge available.
+   *
+   * @param Badge $badge  The badge for which we want progress records.
+   */
   public function ApiGetBadgeRecords( $badge ) {
     if (isset($this->apiGotBadgeRecords[$badge->idv])) return;
     $this->apiGotBadgeRecords[$badge->idv] = true;
@@ -1830,42 +2168,39 @@ class Term extends BaseObject
                    "&section={$this->section->type}&badge_id={$badge->id}" .
                    "&section_id={$this->section->id}&badge_version={$badge->version}&underscores" );
     foreach ($r->items as $item) {
-      $scout = $this->section->FindScout( $item->scoutid );
+      $scout = $this->section->FindScout( (int) $item->scoutid );
       $scout->ApiUseGetBadgeRecords( $badge, $item );
     }
   }
-  
+ 
+  /** Is the specified scout a member (of the term's section) during this term?
+   *
+   * @param int $scoutId  the id of the scout about whom we are enquiring.
+   * @return bool  true iff the given scout was a member of this term's section
+   *           during this term.
+   */
   public function IsMember( int $scoutId )
   { $this->Scouts();
     if (isset($this->scouts[$scoutId])) return $this->scouts[$scoutId];
     return null;
   }
 
+  /** Return all scouts who were members of this term's section during this
+   * term.
+   * @return Scout[int] array of scouts
+   */
   public function Scouts() {
     $this->ApiGetListOfMembers();
     return $this->scouts;
   }
-  
+
+  /** The section for whom this term is defined.
+   *
+   * Each section has it's own set of terms, and this method tells us for which
+   * section this term is defined.
+   * @return Section
+   */
   public function Section()
   { return $this->section;
   }
 }
-/* The following URLs have been observed to return useful stuff.
-
-Get details of an individual
-https://www.onlinescoutmanager.co.uk/ext/members/contact/?action=getIndividual&sectionid=36850&scoutid=1006049&termid=331890&context=members
-
-Get list of patrols in a section
-https://www.onlinescoutmanager.co.uk/ext/settings/patrols/?action=get&sectionid=36850
-
-Get additional information (member address, primary contact etc) about a member
-POST https://www.onlinescoutmanager.co.uk/ext/customdata/?action=getData&section_id=36850
-with associated_id	1006049 - memberid
-associated_type	member
-context	members
-group_order	section
-
-Get shared events associated with this one
-https://www.onlinescoutmanager.co.uk/ext/events/event/sharing/?action=getStatus&eventid=537985&sectionid=38356&_v=2
-*/
-?>

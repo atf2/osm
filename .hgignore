@@ -1,4 +1,6 @@
 syntax: glob
 vendor/*
+temp/*
+docs/*
 composer.lock
 tests/config.tests.php
