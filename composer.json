@@ -1,5 +1,5 @@
 {
-    "name": "atf2/osm",
+    "name": "atf/osm",
     "description": "PHP O-O interface to read OSM's (Online Scout Manager's) web API",
     "type": "library",
     "keywords": ["OSM", "Online", "Scout", "Manager", "API", "PHP"],

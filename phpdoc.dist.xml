@@ -5,7 +5,7 @@
     <target>temp</target>
   </parser>
   <transformer>
-    <target>docs</target>
+    <target>refdocs</target>
   </transformer>
   <files>
     <directory>src</directory>
