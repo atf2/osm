@@ -3,28 +3,108 @@
 </head>
 <body>
 <h1>Contents</h1>
-<ul><li><a href=overview>Overview</li>
+<ul><li><a href=#introduction>Introduction</a></li>
+    <li><a href=#installation>Installation</a></li>
+    <li><a href=#overview>Overview</a></li>
+    <li><a href=#classes>Classes, properties and methods</a></li>
 </ul>
 
-<h1 id=overview>Overview</h1>
+<h1 id=introduction>Introduction</h1>
 <p>This library is intended to provide a simple object-oriented interface to the
 information held in Online Scout Manager.</p>
+<p>You should note that this software and its distribution method is in its
+early days (in 2020) and so you should not hesitate to contact the developer if
+you have problems (andrew at atf dot me dot uk).</p>
 
-<h2>Principles</h2>
-<ul><li>Object-oriented</li>
-    <li>Easy to use</li>
-    <li>Minimises calls to the API</li>
-    <li>Avoids duplication</li>
+<p>The basic idea of the library is that the objects of interest in Online Scout
+Manager are represented by PHP objects with straightforward properties.  The
+caller does not have to concern him or herself with API calls: just access the
+property you want and the API call will take place in the background.</p>
+
+<p>Another principle is that we minimise the number of calls made to the API.
+These are expensive to make as they involve a round trip to a remote server;
+also, we wish to avoid putting an excessive load on the OSM web server.
+We do not make an API call until the information it supplies is needed, and we
+store the results of API calls for the lifetime of the OSM object.</p>
+
+<h1>Installation</h1>
+<h2 id=composer-install>Using Composer</h2>
+<p>If you are new to Composer you will need to install it first.  That is
+outside the scope of this document; a good start is to look at the "Getting
+Started" section of <a href=https://getcomposer.org/>getcomposer.org</a> (but
+consider a <a href=#manual-install>manual install</a> of <i>atf/osm</i>
+instead).</p>
+
+<p>To include <i>atf/osm</i> in a new project the minimal composer.json
+required is:
+<pre><code>
+{
+    "repositories": [
+        {"type": "vcs",
+         "url": "https://github.com/atf2/osm"
+        }
+    ],
+    "require": {
+        "atf/osm": ">=0.1.0"
+    }
+}
+</code></pre>
+(note the '2' after 'atf' in the url!)
+
+<h2 id=manual-install>Manual Installation</h2>
+<p>Since all the functionality of <i>atf/osm</i> is contained in a single php
+script you can just download the script from GitHub
+<a href="https://raw.githubusercontent.com/atf2/osm/master/src/OSM/OSM.php"
+   title="Right click and 'Save Link as' or 'Save target as'">here</a> and
+include it in your project as required.  You will, of course, miss out on the
+automatic updates and so on which the <a href=#composer-install>Composer</a>
+method would give.
+
+<h1 id=overview>Overview</h1>
+<h2>Connecting to the API</h2>
+<p>The first thing your program must do is create an object of class OSM (full
+name \atf\osm\OSM).  You will need to pass the constructor an API Id and Token
+which have been issued to you (as developer) by OSM support.  The Id and Token
+are unique to your application and and identify it to the API.</p>
+<p>The next step is to pass a login name and password to your object's Login
+method.  This will succeed if the login name and password are valid for normal
+online use of OSM, either as a parent or as a leader.</p>
+
+<h2>Navigating the world of OSM</h2>
+<p>Once you are logged in, the OSM object will give you access to a few global
+properties such as:</p>
+<ul><li>a list of your own children
+    <li>a list of sections which you can access as a leader
+    <li>your current section (most recently viewed through the web interface)
 </ul>
+<p>You can also find some objects by their ID (often you need a section ID as
+well).</p>
+<p>There is no need explicitly to query the API, simply access the relevent
+object property and the queries will be performed behind the scenes.  Results of
+queries are cached to minimise the number of API calls that have to be made.</p>
+<p>Most other objects are accessed through a term or a scout, although since
+each section has a default term you can often avoid worrying about terms.</p>
+<p>For example, from a term we can get a list of scouts active in that term or a
+list of events in that term.  From a scout we can get a list of badges they have
+worked on or a list of events they have attended.</p>
 
-<h2>Installation</h2>
-<h3>Using Composer</h3>
-<p>The
-
-<h1>Classes, properties and Methods</h1>
+<h1 id=classes>Classes, properties and Methods</h1>
 <p>Detailed information about the classes, their public and private properties
 and methods is given in the <a href=../refdocs/>reference documentation</a>.
 Here we give a brief description of the use of the various classes.</p>
 
+<h2>Class OSM</h2>
+<h3>Properties</h3>
+<table>
+<tr><td>myChildren</td><td>array of Scouts for whom the logged in user is
+parent</td></tr>
+<tr><td>section</td><td>the current section.  If the logged-in user has leader's
+access to OSM this will initially be the section they last viewed.  Otherwise it
+will be null until changed by a call to SetSection.
+<tr><td>sections</td><td>array of Sections to which the logged-in user has
+leader access</td></tr>
+</table>
+
+<h3>Methods</h3>
 </body>
 </html>

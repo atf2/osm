@@ -1,6 +1,6 @@
 <?php
-/** The following collection of classes provide straitforward access to various
- * parts of the Online Scout Manager software hosted at
+/** The following collection of classes provide straightforward access to
+ * various parts of the Online Scout Manager software hosted at
  * www.onlinescoutmanager.co.uk.
  *
  * Note that the author has no relationship, other than as a customer, with the
@@ -59,12 +59,80 @@ class BaseObject
   }
 }
 
+/*
+  Many objects in this collection of classes use lazy evaluation, only making a
+  call to the API when the value of a property is required.  Each API returns an
+  eclectic mix of information and this comment attempts to summarise which call
+  returns what.
+  
+                  api.php?action=getTerms
+                  api.php?action=getUserRoles
+                  ext/mymember/dashboard/?action=getNextThings
+                  users.php?action=authorise
+                  
+                authorise getNextThings getTerms getUserRoles
+  OSM
+    secret          Y
+    userId          Y
+    
+  Section
+    id                           Y         Y          Y
+    apiPermissions
+    easyFundRaising                                   Y
+    groupId                                           Y
+    groupName                                         Y
+    hasUsedBadges                                     Y
+    isDefault                                         Y
+    meetingDay                                        Y
+    name                                              Y
+    portalBadges                                      Y
+    portalBadgesExpires                               Y
+    portalDetails                                     Y
+    portalDetailsExpires                              Y
+    portalEmail                                       Y
+    portalEmailExpires                                Y
+    portalEvents                                      Y
+    portalEventsExpires                               Y
+    portalProgramme                                   Y
+    portalProgrammeExpires                            Y
+    qmShare                                           Y
+    registrationDate                                  Y
+    section                                           Y
+    subsExpire                                        Y
+    subsLevel                                         Y
+    userpermissions                                   Y
+    
+  Scout
+    id                           Y
+    
+  Term
+    endDate                                Y
+    id                                     Y
+    masterTerm                             Y
+    name                                   Y
+    past                                   Y
+    startDate                              Y
+*/
 /** Class giving access to information held in Online Scout Manager
  *
  * This class handles logging in and out of OSM, and all low-level access to
  * OSM's API.  It also handles concerns which are global to the OSM connection,
  * including maintaining caches of objects (such as Sections and Badges) not
  * related to a particular lower-level object.
+ *
+ * @property int $apiId  Read-only.  The API Id to be used in accessing the API.
+ *           This Id will have been issued to the developer by OSM support.
+ * @property Scout[int] $myChildren  Read-only.  Array of the logged-in user's
+ *           children.  For leaders who are not also parents this will be an
+ *           empty array.
+ * @property Section|null $section  Read-only.  Current section for this OSM
+ *           connection.  For leaders this is initially the current section from
+ *           the OSM web site, otherwise it is initially null.  It can be
+ *           changed by calling method SetSection.
+ * @property Section[int] $sections  Read-only.  Array of sections to which the
+ *           logged-in user has leader access.  Note the sections containing the
+ *           user's own children will not be included unless the user also has
+ *           leader access to those sections.
  */
 class OSM extends BaseObject
 {
@@ -72,11 +140,17 @@ class OSM extends BaseObject
 	const BADGETYPE_STAGED = "staged";
 	const BADGETYPE_ACTIVITY = "activity";
 	
-	/** The API Id to be used in accessing the API.
-   * This Id will have been issued to the developer by OSM support.
+	/** Holds the value of the corresponding virtual public property.
    * @var int
    */
-	public $apiId = 0;
+	private $apiId = 0;
+  
+  /** Array giving information about API calls made.
+   * @var array  each key is the URL of an API call.  Each value is an array
+   *           having two elements: count (the number of times that call has
+   *           made) and nano (the total number of seconds used in that call).
+   */
+  private $apiTimes = array();
 
   /** Cache of badges known to this session.
    * This cache will be checked when a badge definition is required, thus
@@ -90,13 +164,6 @@ class OSM extends BaseObject
    *           created yet.
    */
   private $curlHandle = null;
-
-  /** The current section.
-   * This will be initialised to the section the user was last using in the OSM
-   * web interface.  For parents who are not leaders this will be null.
-   * @var Section|null
-   */
-  private $currentSection = null;
   
   /** The email used to log in to OSM, or null if not logged in.
    * @var string|null
@@ -113,18 +180,21 @@ class OSM extends BaseObject
    */
   public $errorMessage = '';
   
-  /** Array of sections to which the logged-in user has leader access, or null
-   * if the API has not been interrogated (by method Sections).
-   * Note the sections containing the user's own children will not be included
-   * unless the user also has leader access to those sections.
-   * @var null|Section[int]  
+	/** Holds the value of the corresponding virtual public property.  A value of
+   * null may indicate this has not yet been set (in which case property
+   * $section will also be null) or may simply be the value.
+   * @var null|Section
    */
-  private $leaderSections = null;
+  private $section = null;
   
-  /** Array of logged-in user's children.
-   * A value of null indicates the API has not yet been interrogated (by method
-   * MyChildren) to populate this.  For leaders who are not also parents this
-   * will be an empty array.
+	/** Holds the value of the corresponding virtual public property, or is null
+   * to indicate that the API has not been interrogated to find the value yet.
+   * @var null|Section[int]
+   */
+  private $sections = null;
+
+	/** Holds the value of the corresponding virtual public property, or is null
+   * to indicate that the API has not been interrogated to find the value yet.
    * @var null|Scout[int]
    */
   private $myChildren = null;
@@ -132,16 +202,23 @@ class OSM extends BaseObject
   /** Array of sections known to this instance, 
    * This includes both sections to which the user has access and other sections
    * which may have been referenced by, for instance, MyChildren or a shared
-   * event.  Contrast this with property $leaderSections.
+   * event.  Contrast this with property $sections.
    * @var Section[int]   indexed by the section identifiers
    */
-  private $sections = array();
+  private $sectionsCache = array();
 	
 	/** The API Token issued (with $apiId) by OSM support when they authorise use
    * of the API.
 	 * @var string
 	 */
 	private $token;
+
+  /** The current section from the OSM web interface.
+   * This will be initialised to the section the user was last using in the OSM
+   * web interface.  For parents who are not leaders this will be null.
+   * @var Section|null
+   */
+  private $uiSection = null;
 	
 	/** The user ID, issued by the API in response to a username and password,
    * when we log in.
@@ -162,12 +239,12 @@ class OSM extends BaseObject
 	
 	/** Constructor for an OSM object which can be used to access Online Scout Manager
    *
-	 * @param string $apiId API ID, as supplied by OSM support when authorising an application.  If
+	 * @param int $apiId API ID, as supplied by OSM support when authorising an application.  If
    *           this parameter is omitted, the constant OSM_API_ID, if defined, will be used instead.
 	 * @param string $token Token, as supplied by OSM support when authorising an application.  If
    *           this parameter is omitted, the constant OSM_TOKEN, if defined, will be used instead.
 	 */
-	public function __construct( string $apiId = null, string $token = null )
+	public function __construct( int $apiId = null, string $token = null )
   {	// Establish what API Id and Token are to be used to access OSM
     if ($apiId == null && defined( 'OSM_API_ID' )) $apiId = OSM_API_ID;
     $this->apiId = $apiId;
@@ -192,6 +269,34 @@ class OSM extends BaseObject
       $this->email  = $_SESSION['OSM_EMAIL'];
 	  }
 	}
+
+  /** Magic method called when a non-existant property is read (or a private one
+   * is read from outside the class).
+   * @param string $property  the name of the (virtual) property being accessed.
+   * @returns mixed  the value of the (virtual) property.
+   */   
+  public function __get( $property ) {
+    switch ($property) {
+      case 'apiId':
+        // Private variable is set in constructor
+        return $this->apiId;
+      case 'myChildren':
+        // Method MyChildren initialises and returns private variable if rqrd.
+        return $this->MyChildren();
+      case 'section':
+        if ($this->section === null) {
+          // Method Sections initialises uiSection variable if rqrd.
+          $this->Sections();
+          $this->section = $this->uiSection;
+        }
+        return $this->section;
+      case 'sections':
+        // Method Sections fetches list of accessible sections if necessary
+        return $this->Sections();
+      default:
+        throw new \Exception( "unknown property OSM->$property" );
+    }
+  }
   
 	/** Fetch all terms for all accessible sections so they are available for other methods.
    * This method should only be called from class Section.
@@ -215,42 +320,35 @@ class OSM extends BaseObject
    * for this is during unit testing.
    */
   private function ClearCache() {
-    foreach ($this->sections as $section) $section->ClearCache();
+    foreach ($this->sectionsCache as $section) $section->ClearCache();
     if ($this->myChildren)
       foreach ($this->myChildren as $scout) $scout->ClearCache();
-    $this->leaderSections = null;
+    $this->sections = null;
     $this->myChildren = null;
-    $this->sections = array();
+    $this->sectionsCache = array();
   }
 
-  /** Get or set the default section.
+  /** Set the connection's current section.
    *
-   * @param int|null $sectionId  the Id of the section which is to become
-   *           current, null or omitted if no change is required.
+   * This doesn't affect OSM's web UI, which keeps its own record of current
+   * section used.
    *
-   * @return Section|null  the current section (initially, the last section used
-   *           by the current user in the OSM user interface).  May be null if
-   *           the current user is not a leader.
+   * @param Section|int|null $section  the section to become current.  If the
+   *           argument is an integer it is the id of the required section; if
+   *           the argument is null or omitted then the current section of the
+   *           web UI will be used.
+   *
+   * @return Section|null  the new current section.  May be null if no section
+   *           was specified and the current user is not a leader.
   */
-  public function CurrentSection( int $sectionId = null ) {
-    if (!$this->sections) $this->Sections();
-    if ($sectionId) {
-      foreach ($this->sections as $section) {
-        if ($section->id == $sectionId) {
-          $this->currentSection = $section;
-        }
-      }
+  public function SetSection( $section = null ) {
+    if ($section instanceOf Section) $this->section = $section;
+    elseif (is_int( $section )) $this->section = $this->Section( $section );
+    else {
+      if (!$this->sections) $this->Sections();
+      $this->section = $this->uiSection;
     }
-    return $this->currentSection;
-  }
-
-  /** Get the current term of the default section
-   *
-   * @return Term
-  */
-  public function DefaultTerm()
-  { $section = $this->currentSection();
-    return $section->TermAt();
+    return $this->section;
   }
 
   /** Finds the object representing a particular badge and version, creating the object if necessary
@@ -279,12 +377,10 @@ class OSM extends BaseObject
    *           property will prompt an API call to attempt to populate it.
    */
   public function Section( int $sectionId ) {
-    if (!isset( $this->sections[$sectionId] )) {
-      $this->Sections();
-      if (!isset( $this->sections[$sectionId] )) {
-        $this->sections[ $sectionId ] = new Section( $this, $sectionId );
-    } }
-    return $this->sections[ $sectionId ];
+    if (!isset( $this->sectionsCache[$sectionId] )) {
+      $this->sectionsCache[ $sectionId ] = new Section( $this, $sectionId );
+    }
+    return $this->sectionsCache[ $sectionId ];
   }
 
   /** Finds a section of a given type (beavers cubs etc).
@@ -399,7 +495,7 @@ class OSM extends BaseObject
 		curl_setopt( $this->curlHandle, CURLOPT_POST, 1 );
 		curl_setopt( $this->curlHandle, CURLOPT_CONNECTTIMEOUT, 2 );
 		curl_setopt( $this->curlHandle, CURLOPT_RETURNTRANSFER, true );
-    if ( !isset( $this->apiTimes[$url] ) )
+    if (!isset( $this->apiTimes[$url] ) )
       $this->apiTimes[$url] = (object)['count'=>0, 'nano'=>0];
     $this->apiTimes[$url]->nano -= \microtime( true );
 		$msg = curl_exec( $this->curlHandle );
@@ -413,8 +509,7 @@ class OSM extends BaseObject
     //echo htmlspecialchars( "JSON for {$this->base}$url is \"$msg\"" ), "<br/><br/>\n";
 		$out = json_decode($msg);
     // echo "Out for ", htmlspecialchars($url), " is "; var_dump( $out );
-    
-    if (isset( $_GET['traceosm'] )) {
+    if (defined('TRACEOSM') && TRACEOSM && isset( $_GET['traceosm'] )) {
       if (preg_match( $_GET['traceosm'], $url )) {
         echo "\n<h2>", htmlspecialchars( $url ), "</h2>";
         echo "<pre>\n", json_encode( $out, JSON_PRETTY_PRINT ), "</pre>\n";
@@ -475,7 +570,7 @@ class OSM extends BaseObject
    *
    * @return Scout[]
    */   
-  public function MyChildren() {
+  private function MyChildren() {
     if ($this->myChildren == null) {
       $this->myChildren = array();
       $t = $this->PostAPI( "ext/mymember/dashboard/?action=getNextThings" );
@@ -505,10 +600,10 @@ class OSM extends BaseObject
    *
    * @return Section[]
   */
-  public function Sections() {
-    if ($this->leaderSections === null) {
-      $this->currentSection = null;
-      $this->leaderSections = array();
+  private function Sections() {
+    if ($this->sections === null) {
+      $this->uiSection = null;
+      $this->sections = array();
       // The following call returns an array of sections to which the current user has access.
       // The API call returns an array of objects, one for each section to which the logged-in user
       // has access.  The contents of each object are described in method
@@ -519,13 +614,13 @@ class OSM extends BaseObject
         foreach ($apiSections as $apiSection) {
           $section = $this->Section( intval( $apiSection->sectionid ) );
           $section->ApiUseGetUserRoles( $apiSection );
-          $this->leaderSections[ $section->id ] = $section;
-          if ($this->currentSection == null || $apiSection->isDefault)
-            $this->currentSection = $section;
+          $this->sections[ $section->id ] = $section;
+          if ($this->uiSection == null || $apiSection->isDefault)
+            $this->uiSection = $section;
         }
       }
     }
-    return $this->leaderSections;
+    return $this->sections;
   }
 	
 	/**
@@ -1036,6 +1131,21 @@ class EventAttendance extends BaseObject
     }
   }
   
+  /** Magic method called when a non-existant property is read (or a private one
+   * is read from outside the class).
+   * @param string $property  the name of the (virtual) property being accessed.
+   * @returns mixed  the value of the (virtual) property.
+   */   
+  public function __get( $property ) {
+    switch ($property) {
+      // The following are set in the constructor, so are always valid
+      case 'status':
+        return $this->status;
+      default:
+        throw new \Exception( "Attempt to access Event->$property" );
+    }
+  }
+  
   /** Returns the value of a user-defined column for this attendance.
    *
    * @param string $name  the name by which the user knows the column.  E.g. "On coach" or
@@ -1054,7 +1164,7 @@ class EventAttendance extends BaseObject
 /** A Requirement for a badge (corresponds to a column on the Badge's page in
  *  the OSM user interface.
  */
-class Requirement {
+class Requirement extends BaseObject {
   
   /** Unique Id allocated (by OSM) to this requirement.
    * @var int
@@ -1096,7 +1206,6 @@ class Requirement {
    *           the requirement.
    */
   public function __construct( Badge $badge, \stdClass $apiField ) {
-    var_dump( $apiField );
     $this->id = intval( $apiField->field );
     $this->badge = $badge;
     $this->name = $apiField->name;
@@ -2144,7 +2253,7 @@ class Term extends BaseObject
                                 "&term_id={$this->id}&section_id={$this->section->id}" );
       //foreach ($r->structure as $struct) var_dump( $struct );
       foreach ($r->details as $idv => $apiItem) {
-        $badge = $this->osm->FindBadge( $idv );
+        $badge = $this->osm->Badge( $idv );
         $apiTasks = $r->structure->$idv;
         $badge->ApiUseGetBadgeStructure( $apiItem, $apiTasks );
         $this->badges[$type][$idv] = $badge;
