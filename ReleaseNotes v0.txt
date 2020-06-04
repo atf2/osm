@@ -1,0 +1,14 @@
+PHP objects for access to Online Scout Manager
+
+Release Notes version 0
+
+Version 0.1.2
+* Remove session-related code from OSM->Login and OSM->Logoff.
+* Introduce PersistOSM to allow cache to persist between pages.
+* Clean up OSM class, replacing some methods by virtual properties and renaming
+  some other methods and properties to better reflect their natures.
+* Introduce method OSM::PrintAPIUsage to assist in evaluating how hard we are
+  hitting the OSM web service.
+* Add file tests/config.tests.dist.php to provide a model that testers can use
+  to write a file tests/config.tests.php suitable for their environment.
+* Add some basic tests of OSM::Section.

@@ -4,3 +4,4 @@ temp/*
 refdocs/*
 composer.lock
 tests/config.tests.php
+temp.php

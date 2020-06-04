@@ -252,22 +252,6 @@ class OSM extends BaseObject
     $this->token = $token;
     if (!$this->apiId) throw new \Exception( "OSM API id not specified" );
     if (!$this->token) throw new \Exception( "OSM token not specified" );
-    
-    // Retrieve result of previous authorisation if it is present in the session
-    // PHP_SAPI check to protect PHPUnit tests, but may need more work
-    if (PHP_SAPI !== 'cli') {
-      if (!session_id()) session_start();
-    } else {
-      if (!isset( $_SESSION )) $_SESSION = array();
-    }
-    if (!isset( $_SESSION['OSM_EXPIRES'] ) || time() > $_SESSION['OSM_EXPIRES'])
-      unset( $_SESSION['OSM_USERID'] );
-    $_SESSION['OSM_EXPIRES'] = time() + 30 * 60; // In half an hour
-    if (isset( $_SESSION['OSM_USERID'] ) && isset( $_SESSION['OSM_SECRET'] ))
-    { $this->userId = $_SESSION['OSM_USERID'];
-    	$this->secret = $_SESSION['OSM_SECRET'];
-      $this->email  = $_SESSION['OSM_EMAIL'];
-	  }
 	}
 
   /** Magic method called when a non-existant property is read (or a private one
@@ -286,13 +270,14 @@ class OSM extends BaseObject
       case 'section':
         if ($this->section === null) {
           // Method Sections initialises uiSection variable if rqrd.
-          $this->Sections();
+          $this->ApiGetUserRoles();
           $this->section = $this->uiSection;
         }
         return $this->section;
       case 'sections':
         // Method Sections fetches list of accessible sections if necessary
-        return $this->Sections();
+        $this->ApiGetUserRoles();
+        return $this->sections;
       default:
         throw new \Exception( "unknown property OSM->$property" );
     }
@@ -304,12 +289,39 @@ class OSM extends BaseObject
 	 * @return void
 	 */
   public function ApiGetTerms()
-  { $this->Sections();
+  { $this->ApiGetUserRoles();
     $apiTerms = $this->PostAPI( 'api.php?action=getTerms' );
     //var_dump( $apiTerms );
     foreach ($this->sections as $section)
-    { if (isset($apiTerms->{$section->id})) $section->ApiUseGetTerms( $apiTerms->{$section->id} );
+    { if (isset($apiTerms->{$section->id})) $section->UseApiGetTerms( $apiTerms->{$section->id} );
       else $section->ApiUseGetTerms( array() );
+    }
+  }
+
+  /** Call API with action getUserRoles to find accessible sections and many of
+   * their properties.
+   *
+   * @return void
+  */
+  public function ApiGetUserRoles(): void {
+    if ($this->sections === null) {
+      $this->uiSection = null;
+      $this->sections = array();
+      // The following call returns an array of sections to which the current user has access.
+      // The API call returns an array of objects, one for each section to which the logged-in user
+      // has access.  The contents of each object are described in method
+      // Section->ApiUseGetUserRoles
+      $apiSections = $this->PostAPI( 'api.php?action=getUserRoles' );
+      //var_dump( $apiSections );
+      if (is_array( $apiSections )) {
+        foreach ($apiSections as $apiSection) {
+          $section = $this->Section( intval( $apiSection->sectionid ) );
+          $section->UseApiGetUserRoles( $apiSection );
+          $this->sections[ $section->id ] = $section;
+          if ($this->uiSection == null || $apiSection->isDefault)
+            $this->uiSection = $section;
+        }
+      }
     }
   }
  
@@ -320,9 +332,9 @@ class OSM extends BaseObject
    * for this is during unit testing.
    */
   private function ClearCache() {
-    foreach ($this->sectionsCache as $section) $section->ClearCache();
+    foreach ($this->sectionsCache as $section) $section->BreakCache();
     if ($this->myChildren)
-      foreach ($this->myChildren as $scout) $scout->ClearCache();
+      foreach ($this->myChildren as $scout) $scout->BreakCache();
     $this->sections = null;
     $this->myChildren = null;
     $this->sectionsCache = array();
@@ -345,7 +357,7 @@ class OSM extends BaseObject
     if ($section instanceOf Section) $this->section = $section;
     elseif (is_int( $section )) $this->section = $this->Section( $section );
     else {
-      if (!$this->sections) $this->Sections();
+      if (!$this->sections) $this->ApiGetUserRoles();
       $this->section = $this->uiSection;
     }
     return $this->section;
@@ -391,7 +403,7 @@ class OSM extends BaseObject
    *           returned; may be used to request the 2nd, 3rd etc instead.
    */
   public function FindSectionByType( string $type, int $n = 1 )
-  { $this->Sections();
+  { $this->ApiGetUserRoles();
     foreach ($this->sections as $section)
     { if ($section->type == $type && --$n <= 0) return $section;
     }
@@ -418,7 +430,8 @@ class OSM extends BaseObject
   /** Check whether we are logged in as a leader */
   public function IsLoggedInAsLeader() {
     if (!$this->IsLoggedIn()) return false;
-    return count($this->Sections()) > 0;
+    $this->ApiGetUserRoles();
+    return count($this->sections) > 0;
   }
 	
 	/** Authorize the API with the username and password provided
@@ -440,9 +453,7 @@ class OSM extends BaseObject
     $this->secret = $apiData->secret;
 		$this->userId = $apiData->userid;
     $this->email = $email;
-    $_SESSION['OSM_USERID'] = $this->userId;
-		$_SESSION['OSM_SECRET'] = $this->secret;
-    $_SESSION['OSM_EMAIL'] = $this->email;
+    $this->ClearCache();
 		return true;
 	}
   
@@ -455,9 +466,6 @@ class OSM extends BaseObject
 	public function Logout( ) {
     $apiData = $this->PostAPI( 'ext/users/auth/?action=logout' );
 		$this->secret = $this->userId = $this->email = null;
-    unset( $_SESSION['OSM_EMAIL'] );
-    unset( $_SESSION['OSM_USERID'] );
-		unset( $_SESSION['OSM_SECRET'] );
     $this->ClearCache();
 	}
   
@@ -476,7 +484,7 @@ class OSM extends BaseObject
 	 */
 	public function PostAPI( $url, $postArgs=array(), $throwErrors = true ) {
     $this->errorCode = $this->errorMessage = '';
-		if ($this->curlHandle === null) $this->curlHandle = curl_init();
+		if (!$this->curlHandle) $this->curlHandle = curl_init();
   
     // Include API Id and token as POST fields
 		$postArgs['apiid'] = $this->apiId;
@@ -512,7 +520,7 @@ class OSM extends BaseObject
     if (defined('TRACEOSM') && TRACEOSM && isset( $_GET['traceosm'] )) {
       if (preg_match( $_GET['traceosm'], $url )) {
         echo "\n<h2>", htmlspecialchars( $url ), "</h2>";
-        echo "<pre>\n", json_encode( $out, JSON_PRETTY_PRINT ), "</pre>\n";
+        echo "<pre>\n", htmlspecialchars( json_encode( $out, JSON_PRETTY_PRINT ) ), "</pre>\n";
       }
     }
 
@@ -587,6 +595,62 @@ class OSM extends BaseObject
     return $this->myChildren;
   }
 
+  /** Checks this OSM object is OK to persist into a new page, and removes parts
+   * which should not persist.
+   * @param int $apiId  the application identifier, as supplied by OSM support
+   *           when authorising the application.  Persistance is permitted only
+   *           if this matches the API Id of this object.
+   * @param string $token  the token, as supplied by OSM support when
+   *           authorising the application.  Persistance is permitted only if
+   *           this matches the token of this object.
+   *
+   * @returns  true iff the apiId and token match.
+   */
+  public function OkToPersist( $apiId, $token ): bool {
+    $this->apiTimes = array();
+    return $apiId == $this->apiId && $token == $this->token;
+  }
+
+  /** Returns an OSM object which persists via the session.
+   *
+   * The first time this method is called it will return a new OSM object just
+   * like 'new OSM( $apiId, $token )'.  However, it will also save that object
+   * and related information in $_SESSION array so that, when execution is
+   * terminated, the object will be saved as part of the session state.
+   * If a subsequent page calls this method then the OSM object will be
+   * reconstituted, including the cached sections, scouts, badges, permissions
+   * etc.
+   *
+   * The state written will include changes made to the returned object up until
+   * the time the session is written (usually at the end of execution).  This
+   * means that the cache will effectively live through a sequence of pages,
+   * significantly reducing the load on the OSM servers.  
+   *
+   * Note that a new, empty, OSM object will be returned if any of the
+   * following are the case:
+   * - more than thirty minutes have elapsed
+   * - the API Id or token supplied in this call differ from those in the saved
+   *   OSM.
+   *
+	 * @param int $apiId API ID, as supplied by OSM support when authorising an
+   *           application.
+	 * @param string $token Token, as supplied by OSM support when authorising an
+   *           application.
+   *
+   * @returns OSM an OSM object allowing connection to Online Scout Manager.
+   */
+  public static function PersistantOSM( int $apiId, string $token ) {
+    if (!session_id()) session_start();
+    $osm = $_SESSION['OSM'] ?? null;
+    if (!$osm || !isset($_SESSION['OSM_EXPIRY']) ||
+        $_SESSION['OSM_EXPIRY'] < time() || !($osm instanceof OSM) ||
+        !$osm->OkToPersist( OSM_API_ID, OSM_TOKEN )) {
+      $osm = new OSM( OSM_API_ID, OSM_TOKEN );
+    }
+    $_SESSION['OSM_EXPIRY'] = time() + 30 * 60;
+    return $_SESSION['OSM'] = $osm;
+  }
+
   /** Print summary of API calls and time taken since OSM object was created.
    */
   public function PrintAPIUsage(): void {
@@ -594,33 +658,6 @@ class OSM extends BaseObject
       echo "\n", number_format( $a->nano, 3 ), " seconds for ", $a->count,
            " calls of ", htmlspecialchars( $url ), "<br/>";
     }
-  }
-
-  /** Return array of sections available to the logged-in user
-   *
-   * @return Section[]
-  */
-  private function Sections() {
-    if ($this->sections === null) {
-      $this->uiSection = null;
-      $this->sections = array();
-      // The following call returns an array of sections to which the current user has access.
-      // The API call returns an array of objects, one for each section to which the logged-in user
-      // has access.  The contents of each object are described in method
-      // Section->ApiUseGetUserRoles
-      $apiSections = $this->PostAPI( 'api.php?action=getUserRoles' );
-      //var_dump( $apiSections );
-      if (is_array( $apiSections )) {
-        foreach ($apiSections as $apiSection) {
-          $section = $this->Section( intval( $apiSection->sectionid ) );
-          $section->ApiUseGetUserRoles( $apiSection );
-          $this->sections[ $section->id ] = $section;
-          if ($this->uiSection == null || $apiSection->isDefault)
-            $this->uiSection = $section;
-        }
-      }
-    }
-    return $this->sections;
   }
 	
 	/**
@@ -937,9 +974,10 @@ class Event extends BaseObject
    *             will be announced later.
   */
   public function __construct( Section $section, \stdClass $apiEvent )
-  { $this->section = $section;
+  { assert( is_numeric( $apiEvent->eventid ) );;
+    $this->section = $section;
     $this->osm = $section->osm;
-    $this->id = $apiEvent->eventid;
+    $this->id = (int) ($apiEvent->eventid);
     $this->cost = $apiEvent->cost == "-1.00" ? null : floatval( $apiEvent->cost );
     $this->name = $apiEvent->name;
     $this->startDate = date_create( $apiEvent->startdate );
@@ -976,6 +1014,18 @@ class Event extends BaseObject
       }
     }
     return $this->attendees;
+  }
+
+  /** Remove references to other objects.
+   *
+   * Used while clearing the cache of an OSM object to remove anything that may
+   * result in a circular reference.  This allows the PHP garbage collecter to
+   * be more efficient.
+   */
+  public function BreakCache() {
+    $this->section = null;
+    $this->attendees = null;
+    $this->linkedEvents = null;
   }
   
   /** How has this event been shared?
@@ -1520,6 +1570,17 @@ class Scout extends BaseObject
     return $this->badgeWork[$badge->idv];
   }
 
+  /** Remove references to other objects.
+   *
+   * Used while clearing the cache of an OSM object to remove anything that may
+   * result in a circular reference.  This allows the PHP garbage collecter to
+   * be more efficient.
+   */
+  public function BreakCache() {
+    $this->osm = null;
+    $this->section = null;
+  }
+
   /** Can this scout skip the given requirement because enough other
    * requirements in the same area have been satisfied?
    *
@@ -1745,13 +1806,40 @@ class Scout extends BaseObject
  * The amount of information actually available about a section will depend upon
  * the permissions granted (by OSM) to the current user.  In particular,
  * a parent may have access to no more than the Id of a section.
+ *
+ * @property int|null $meetingDay.  The day of the week (1=Mon, 2=Tue, etc) on
+ *           which the section holds its usual weekly meetings, or null if this
+ *           has not been specified.
+
+    $this->portalBadges = $config->portal->badges == 1;
+    $this->portalEmail = $config->portal->emailbolton == 1;
+    $this->portalEvents = $config->portal->events == 1;
+    $this->portalPersonal = $config->portal->details == 1;
+    $this->portalProgramme = $config->portal->programme == 1;
+ * @property bool $portalBadges.  True iff this section has subscribed to the
+ *           add-on allowing parents to view badge progress.
+ * @property bool $portalEmail.  True iff this section has subscribed to the
+ *           add-on allowing leaders to send attachments with emails and to view
+ *           sent emails.
+ * @property bool $portalEvents.  True iff this section has subscribed to the
+ *           add-on allowing leaders to invite parents to events and allowing
+ *           parents to sign-up for events.
+ * @property bool $portalPersonal.  True iff this section has subscribed to the
+ *           add-on allowing parents to view and amend personal and contact
+ *           details.
+ * @property bool $portalProgramme.  True iff this section has subscribed to the
+ *           add-on allowing parents to see the programme. 
+ * @property DateTime $registrationDate.  The date this section was first
+ *           registered on OSM.
+ * @property DateTime $subscriptionExpires.  The date on which this section's
+ *           current OSM subscription expires.
+ * @property int $subscriptionLevel.  The level of OSM subscription for this
+ *           section.  Possible values are 1, 2 or 3 for bronze, silver and gold
+ *           respectively.
  */
 class Section extends BaseObject
-{ /** @var boolean  true iff we have populated only the most basic properties of the section. */
-  private $skeleton;
-  
-  /** @var int The Id by which this Section is known to the OSM API. */
-  public $id;
+{ /** @var int The Id by which this Section is known to the OSM API. */
+  private $id;
   
   /** @var $apiPermissions \stdClass|null  An object, like property permissions, but indicating the
    * permission the current application has been granted (by the current user) to this section.  A
@@ -1767,19 +1855,73 @@ class Section extends BaseObject
   
   /** @var string The name of the Group of which this section is a part. */
   private $groupName;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property, which may be null.
+   * @var null|int
+   */
+  private $meetingDay = null;
   
   /** @var string The name of this section. */
   private $name;
   
   /** @var OSM  the object through which we are accessing OSM. */
-  public $osm;
+  private $osm;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|bool
+   */
+  private $portalBadges = null;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|bool
+   */
+  private $portalEmail = null;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|bool
+   */
+  private $portalEvents = null;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|bool
+   */
+  private $portalPersonal = null;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|bool
+   */
+  private $portalProgramme = null;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|DateTime
+   */
+  private $registrationDate = null;
 
   /** @var Scout[]  array of scouts, indexed by id, in this section.
-   * This array is not necessarily complete, and may be added to by calling FindScout with
-   * parameter $create set true.
+   * This array is not necessarily complete, and may be added to by method
+   * Scout.
    */
   private $scouts = null;
-  
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|DateTime
+   */
+  private $subscriptionExpires = null;
+
+	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+   * property.
+   * @var null|int
+   */
+  private $subscriptionLevel = null;
+
   /** @var null|Term[] An array of terms for this section, indexed by integers 0.. */
   private $terms = null;
   
@@ -1820,15 +1962,19 @@ class Section extends BaseObject
    * @returns mixed
    */
   public function __get( $property ) {
+    if (property_exists( self::class, $property ) && $this->{$property} !== null)
+      return $this->{$property};
     switch ($property) {
       case 'groupId':
       case 'groupName':
+      case 'meetingDay':
       case 'name':
       case 'type':
-        if ($this->$property === null) $this->osm->Sections();
-        return $this->$property;
+        if ($this->$property === null) $this->osm->ApiGetUserRoles();
+        if ($this->property !== null) return $this->$property;
+        // Fall through to treat as error.
       default:
-        throw new exception( "Scout->$property not found" );
+        throw new \Exception( "Section->$property not found or null" );
     }
   }
   
@@ -1840,75 +1986,40 @@ class Section extends BaseObject
   { return $this->name;
   }
 
-  /** Populate properties of this section using information from a call to
-   * api.php?action=getUserRoles.
+  /** Remove references to other objects.
    *
-   * @param \stdClass $apiObj  one of the objects returned by the API call.  See
-   *           below for a detailed description.
-   *
-   * @return void
+   * Used while clearing the cache of an OSM object to remove anything that may
+   * result in a circular reference.  This allows the PHP garbage collecter to
+   * be more efficient.
    */
-  public function ApiUseGetUserRoles( \stdClass $apiObj ) {
-    /* The parameter will have the following properties:
-       groupname string giving the name of the group containing the section
-       groupid   numeric string identifying the group.  This is the same for all sections
-                 within the same group but no further use within the API is known.
-       sectionid numeric string identifying the section.  Appears to be globally unique.
-       sectionname string giving name of section, as shown in OSM interface.
-       section   string identifying the section age-group.  Values seen are 'adults',
-                 'beavers', 'cubs', 'scouts' and 'waiting'.
-       isDefault string '0' or '1'.  Exactly one of the sections returned will have value
-                 '1': the section last used in the OSM web interface.
-       permissions   an object describing the permission levels for the current user in the section.
-                 See the description of method Permission for details of the property names and
-                 permitted values.  An absent property should be treated as zero.
-       regdate   string of form YYYY-MM-DD giving the date on which the section was first
-                 registered in OSM.
-       sectionConfig an object (see below) giving information mainly related to the level of
-                  subscription paid for.
-     The sectionConfig object has the following properties:
-       subscription_level  integer: 1=>Bronze, 2=>Silver, 3=>Gold
-       subscription_expires string of form YYYY-MM-DD giving expiry date of current
-                  subscription.
-       section_type  string apparently identical to the 'section' property of the section.
-       sectionType  string apparently identical to the 'section' property of the section.
-       parentSectionId  the only value observed is '0'.
-       hasUsedBadgeRecords  boolean.
-       subscription_active  boolean.  Note this may relate to automatic renewal being active
-                 rather than to the subscription actually being current.
-       subscription_lastExpires string of form YYYY-MM-DD.  Semantics unclear.
-       trial     an object, purpose unknown.  This property is not always present.
-       portal    an object with five integer properties specifying which parent portal options
-                 have been purchased.  1=>yes, 0=>no for events, programme, badges,
-                 (personal) details and emailbolton (for the Email system).  Two further
-                 properties 'emailAddress' and 'emailAddressCopy' give the from address and
-                 address for copies of all emails.
-       portalExpires an object with five string properties, with names like the integer
-                 properties of portal, containing the expiry dates of the parent portal
-                 subscriptions, together with five integer properties, named as the others
-                 but with an 'A' appended, whose purpose is unknown.
-       meeting_day  string giving the three-letter name of the section's usual meeting day.
-                 E.g. 'Thu'.  This doesn't seem to be editable in the web interface.
-       config_subscriptions_checked  string of form YYYY-MM-DD which appears usually to be
-                 set to today's date.
-  */
-    assert( $this->id == intval( $apiObj->sectionid ) );
-    $this->groupId = $apiObj->groupid;
-    $this->groupName = $apiObj->groupname;
-    $this->name = $apiObj->sectionname;
-    $this->type = $apiObj->section;
-    $this->userPermissions = $apiObj->permissions;
+  public function BreakCache() {
+    if ($this->events) {
+      foreach ($this->events as $event) $event->BreakCache();
+      $this->events = null;
+    }
+    $this->osm = null;
+    if ($this->scouts) {
+      foreach ($this->scouts as $scout) $scout->BreakCache();
+      $this->scouts = null;
+    }
+    if ($this->terms) {
+      foreach ($this->terms as $term) $term->BreakCache();
+      $this->terms = null;
+    }
   }
 
-  /** Fetch list of Events for this section
+  /** Fetch list of Events for this section, not including archived events
    *
    * @return Event[int]
    */
   public function Events() {
     if ($this->events === null) {
       $this->events = array();
+      // Note: the alternative ext/events/summary/?action=get returns less
+      // information about each event and requires both a section and term id,
+      // so we don't use it here.  The additional information it provides on numbers
+      // accepted etc we can get if required.
       $apiEvents = $this->osm->PostAPI( "events.php?action=getEvents&sectionid={$this->id}" );
-      // TODO: Consider reporting back somehow if failed to find events due to a permission issue.
       if ($apiEvents) foreach ($apiEvents->items as $apiEvent) {
         $event = new Event( $this, $apiEvent );
         $this->events[$event->id] = $event;
@@ -1930,24 +2041,20 @@ class Section extends BaseObject
   
   /** Returns the object representing a particular scout in this section.
    *
-   * @param int $scoutId  the integer uniquely identifying this scout.
-   * @param bool $create  controls what happens when the requested scout cannot be found in the
-   *           section cache.  If $create is true then an object for the scout will be created (this
-   *           may involve API calls to discover the scout's properties), otherwise a value null
-   *           will be returned.
+   * @param int|string $scoutId  the integer (or numeric string) uniquely
+   *           identifying this scout.  No check is made whether this is
+   *           actually a scout in this section: this will become apparent if an
+   *           attempt is made to read properties which the API will be unable
+   *           to supply.
    *
-   * @returns Scout|null  object representing the specified scout in this section.  If the same
-   *           person is a member in several sections then they will be represented by a different
-   *           object in each section, all having the same scoutId.
-   *           The value null will be returned only in the case that parameter bool is false and the
-   *           scout object has not already been created.  Note that the scout may be present in the
-   *           API in this case.
+   * @returns Scout  object representing the specified scout in this section.
+   *           If the same person is a member in several sections then they will
+   *           be represented by a different object in each section, all having
+   *           the same scoutId.
    */
-  public function FindScout( int $scoutId, bool $create = true )
-  { if (!isset( $this->scouts[$scoutId] )) {
-      if (!$create) return null;
+  public function FindScout( int $scoutId )
+  { if (!isset( $this->scouts[$scoutId] ))
       $this->scouts[$scoutId] = new Scout( $this, $scoutId );
-    }
     return $this->scouts[$scoutId];
   }
   
@@ -1957,19 +2064,6 @@ class Section extends BaseObject
   */
   public function FullName()
   { return $this->groupName . ': ' . $this->name;
-  }
-  
-  /** Initialise the list of terms for this section
-   *
-   * This method should be called only from the ApiGetTerms method of class OSM.
-   * @param \stdClass[] $apiTerms  an array of objects, each having properties copied from the JSON
-   *           returned from the API.
-  */
-  public function ApiUseGetTerms( array $apiTerms )
-  { $this->terms = array();
-    foreach ($apiTerms as $apiTerm)
-    { $this->terms[] = new Term( $this, $apiTerm );
-    }
   }
 
   /** Return the OSM object which created this Section.
@@ -1993,17 +2087,19 @@ class Section extends BaseObject
 
   /** Returns level of permission the logged-in user has for the given section.
    *
-   * @param string $area  one or more strings specifying areas of the API we may wish to access.
-   *           The permitted strings are as follows: badge (Qualifications), member (Personal
-   *           Details), user (Administration), register (not known) and programme (Programme),
-   *           events (Events), flexi (Flexi-Records), finance (Finances) and quartermaster
-   *           (Quartermaster).
+   * @param string $area  one or more strings specifying areas of the API we may
+   *           wish to access.  The permitted strings are as follows: badge
+   *           (Qualifications), member (Personal Details), user
+   *           (Administration), contact (unknown), register (Attendance),
+   *           programme (Programme), events (Events), flexi (Flexi-Records),
+   *           finance (Finances) and quartermaster (Quartermaster).
    *
-   * @return int the lowest level of permission the current user has granted this application in the
-   *           areas specified in the parameters.  I.e. if the user has granted read permission in
-   *           one named area and write permission in another then the result will indicate read
-   *           permission.  Values are 0 => No permission, 10 => Read-only, 20 => read and write,
-   *           100 => Adminstrator.
+   * @return int the lowest level of permission the current user has granted
+   *           this application in the areas specified in the parameters.  I.e.
+   *           if the user has granted read permission in one named area and
+   *           write permission in another then the result will indicate read
+   *           permission.  Values are 0 => No permission, 10 => Read-only,
+   *           20 => read and write, 100 => Adminstrator.
    */
   public function Permissions( $area ) {
     // If we don't know what external access permissions have been granted to this Application, ask
@@ -2095,7 +2191,94 @@ class Section extends BaseObject
     }
     return $bestTerm;
   }
+  
+  /** Initialise the list of terms for this section
+   *
+   * This method should be called only from the ApiGetTerms method of class OSM.
+   * @param \stdClass[] $apiTerms  an array of objects, each having properties copied from the JSON
+   *           returned from the API.
+  */
+  public function UseApiGetTerms( array $apiTerms )
+  { $this->terms = array();
+    foreach ($apiTerms as $apiTerm)
+    { $this->terms[] = new Term( $this, $apiTerm );
+    }
+  }
 
+  /** Populate properties of this section using information from a call to
+   * api.php?action=getUserRoles.
+   *
+   * @param \stdClass $apiObj  one of the objects returned by the API call.  See
+   *           below for a detailed description.
+   *
+   * @return void
+   */
+  public function UseApiGetUserRoles( \stdClass $apiObj ) {
+    /* The parameter will have the following properties:
+       groupname string giving the name of the group containing the section
+       groupid   numeric string identifying the group.  This is the same for all sections
+                 within the same group but no further use within the API is known.
+       sectionid numeric string identifying the section.  Appears to be globally unique.
+       sectionname string giving name of section, as shown in OSM interface.
+       section   string identifying the section age-group.  Values seen are 'adults',
+                 'beavers', 'cubs', 'scouts' and 'waiting'.
+       isDefault string '0' or '1'.  Exactly one of the sections returned will have value
+                 '1': the section last used in the OSM web interface.
+       permissions   an object describing the permission levels for the current user in the section.
+                 See the description of method Permission for details of the property names and
+                 permitted values.  An absent property should be treated as zero.
+       regdate   string of form YYYY-MM-DD giving the date on which the section was first
+                 registered in OSM.
+       sectionConfig an object (see below) giving information mainly related to the level of
+                  subscription paid for.
+     The sectionConfig object has the following properties:
+       subscription_level  integer: 1=>Bronze, 2=>Silver, 3=>Gold
+       subscription_expires string of form YYYY-MM-DD giving expiry date of current
+                  subscription.
+       section_type  string apparently identical to the 'section' property of the section.
+       sectionType  string apparently identical to the 'section' property of the section.
+       parentSectionId  the only value observed is '0'.
+       hasUsedBadgeRecords  boolean.
+       subscription_active  boolean.  Note this may relate to automatic renewal being active
+                 rather than to the subscription actually being current.
+       subscription_lastExpires string of form YYYY-MM-DD.  Semantics unclear.
+       trial     an object, purpose unknown.  This property is not always present.
+       portal    an object with five integer properties specifying which parent portal options
+                 have been purchased.  1=>yes, 0=>no for events, programme, badges,
+                 (personal) details and emailbolton (for the Email system).  Two further
+                 properties 'emailAddress' and 'emailAddressCopy' give the from address and
+                 address for copies of all emails.
+       portalExpires an object with five string properties, with names like the integer
+                 properties of portal, containing the expiry dates of the parent portal
+                 subscriptions, together with five integer properties, named as the others
+                 but with an 'A' appended, whose purpose is unknown.
+       meeting_day  string giving the three-letter name of the section's usual meeting day.
+                 E.g. 'Thu'.  This doesn't seem to be editable in the web interface.
+       config_subscriptions_checked  string of form YYYY-MM-DD which appears usually to be
+                 set to today's date.
+  */
+    assert( $this->id == intval( $apiObj->sectionid ) );
+    //echo "Populating section {$apiObj->sectionname}<br/>\n";
+    //var_dump( $apiObj );
+    $config = $apiObj->sectionConfig;
+    //var_dump( $config );
+    $this->groupId = intval( $apiObj->groupid );
+    $this->groupName = $apiObj->groupname;
+    $this->meetingDay = ['Mon'=>1, 'Tue'=>2, 'Wed'=>3, 'Thu'=>4, 'Fri'=>5,
+                        'Sat'=>6, 'Sun'=>7][$config->meeting_day??0] ?? null;
+    $this->name = $apiObj->sectionname;
+    $this->portalBadges = $config->portal->badges??0 == 1;
+    $this->portalEmail = $config->portal->emailbolton??0 == 1;
+    $this->portalEvents = $config->portal->events??0 == 1;
+    $this->portalPersonal = $config->portal->details??0 == 1;
+    $this->portalProgramme = $config->portal->programme??0 == 1;
+    $this->registrationDate = date_create( $apiObj->regdate );
+    $this->subscriptionLevel = $config->subscription_level;
+    $this->subscriptionExpires = date_create( $config->subscription_expires );
+    $this->type = $apiObj->section;
+    $this->userPermissions = $apiObj->permissions;
+  }
+ 
   /** Returns level of permission the logged-in user has for the given section.
    *
    * @param string $area  one or more strings specifying areas of OSM in which we are interested.
@@ -2112,7 +2295,7 @@ class Section extends BaseObject
    *           been granted for external access by an application.
    */
   public function UserPermissions( $area ) {
-    if ($this->userPermissions === null) $this->osm->Sections();
+    if ($this->userPermissions === null) $this->osm->ApiGetUserRoles();
     if ($this->userPermissions === null) $this->userPermissions = new \stdClass();
     $p = 100;
     foreach (func_get_args() as $a) {
@@ -2132,7 +2315,7 @@ class Section extends BaseObject
           else $p = 0;
           break;
         default:
-          throw new Exception( "$a is not a permission name" );
+          throw new \Exception( "$a is not a permission name" );
       }
     }
     return $p;
@@ -2281,7 +2464,22 @@ class Term extends BaseObject
       $scout->ApiUseGetBadgeRecords( $badge, $item );
     }
   }
- 
+
+  /** Remove references to other objects.
+   *
+   * Used while clearing the cache of an OSM object to remove anything that may
+   * result in a circular reference.  This allows the PHP garbage collecter to
+   * be more efficient.
+   */
+  public function BreakCache() {
+    $this->badges = array();
+    $this->osm = null;
+    if ($this->scouts)
+      foreach ($this->scouts as $scout) $scout->BreakCache();
+    $this->scouts = null;
+    $this->section = null;
+  }
+
   /** Is the specified scout a member (of the term's section) during this term?
    *
    * @param int $scoutId  the id of the scout about whom we are enquiring.

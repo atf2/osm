@@ -11,7 +11,7 @@ class OSMTest extends TestCase
     private static $osm;
     private static $login;
     
-    public static function setUpBeforeClass() : void
+    public static function setUpBeforeClass(): void
     {
         //phpinfo();
         self::assertTrue( defined( 'OSM_API_ID_VALID' ), "Define OSM_API_ID_VALID in config.tests.php" );
@@ -75,6 +75,9 @@ class OSMTest extends TestCase
       foreach ($sections as $section) {
         $this->assertInstanceOf( Section::class, $section );
       }
+    }
+
+    public static function tearDownAfterClass(): void {
       self::$osm->PrintAPIUsage();
     }
 }
