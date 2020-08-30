@@ -94,7 +94,7 @@ and methods is given in the <a href=../refdocs/index.html>reference documentatio
 Here we give a brief description of the use of the various classes.</p>
 
 <h2>Class OSM</h2>
-<h3>Properties</h3>
+<h3>Public Properties</h3>
 <table>
 <tr><td>myChildren</td><td>array of Scouts for whom the logged in user is
 parent</td></tr>
@@ -105,6 +105,22 @@ will be null until changed by a call to SetSection.
 leader access</td></tr>
 </table>
 
-<h3>Methods</h3>
+<h3>Public Methods</h3>
+<table>
+<tr><td>new OSM( $apiId, $token )</td>
+    <td>Returns an OSM object (one would rarely want more than one) which can be
+    used to log in and read information from OSM.  Information fetched from OSM
+    will be cached to avoid multiple calls for the same information but the
+    cache will be discarded if you log out or discard the OSM object (for
+    example, when the script exits).</td></tr>
+<tr><td>PersistantOSM( $apiId, $token )</td>
+    <td>Returns an OSM object which, provided a PHP session is available, will
+    persist the cache across multiple pages.  This usefully reduces the load on
+    the OSM web servers where people might be viewing several pages which draw
+    on overlapping information.  However, the cache can get out of date unless
+    method <a href=#osm_ClearCache
+    title='Method ClearCache in this document'>ClearCache</a> is called or login
+    is repeated.</td></tr>
+</table>
 </body>
 </html>

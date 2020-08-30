@@ -4,7 +4,7 @@ namespace atf\OSM;
 use PHPUnit\Framework\TestCase;
 
 include_once "config.tests.php";
-//$_GET['traceosm'] = "/getNextThings/";
+//$_GET['traceosm'] = "/getSummary/";
 
 class OSMTest extends TestCase
 {

@@ -10,6 +10,7 @@
  */
 declare(strict_types=1);
 namespace atf\OSM;
+//define( 'TRACEOSM', '/(Summary|getIndividual)/' );
 
 /* The comment below contains pretty much the only help provided by OSM on how
  * to use their API.  It is reproduced here for reference.
@@ -120,19 +121,20 @@ class BaseObject
  * including maintaining caches of objects (such as Sections and Badges) not
  * related to a particular lower-level object.
  *
- * @property int $apiId  Read-only.  The API Id to be used in accessing the API.
- *           This Id will have been issued to the developer by OSM support.
- * @property Scout[int] $myChildren  Read-only.  Array of the logged-in user's
- *           children.  For leaders who are not also parents this will be an
- *           empty array.
- * @property Section|null $section  Read-only.  Current section for this OSM
- *           connection.  For leaders this is initially the current section from
- *           the OSM web site, otherwise it is initially null.  It can be
+ * @property-read int $apiId  Read-only.  The API Id to be used in accessing the
+ *           API.  This Id will have been issued to the developer by OSM
+ *           support.
+ * @property-read Scout[int] $myChildren  Read-only.  Array of the logged-in
+ *           user's children.  For leaders who are not also parents this will be
+ *           an empty array.
+ * @property-read Section|null $section  Read-only.  Current section for this
+ *           OSM connection.  For leaders this is initially the current section
+ *           from the OSM web site, otherwise it is initially null.  It can be
  *           changed by calling method SetSection.
- * @property Section[int] $sections  Read-only.  Array of sections to which the
- *           logged-in user has leader access.  Note the sections containing the
- *           user's own children will not be included unless the user also has
- *           leader access to those sections.
+ * @property-read Section[int] $sections  Read-only.  Array of sections to which
+ *           the logged-in user has leader access.  Note the sections containing
+ *           the user's own children will not be included unless the user also
+ *           has leader access to those sections.
  */
 class OSM extends BaseObject
 {
@@ -254,11 +256,17 @@ class OSM extends BaseObject
     if (!$this->token) throw new \Exception( "OSM token not specified" );
 	}
 
-  /** Magic method called when a non-existant property is read (or a private one
-   * is read from outside the class).
-   * @param string $property  the name of the (virtual) property being accessed.
-   * @returns mixed  the value of the (virtual) property.
-   */   
+  /** Return a virtual property of the OSM connection.
+   *
+   * Several private properties of the OSM object are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
+   */
   public function __get( $property ) {
     switch ($property) {
       case 'apiId':
@@ -283,6 +291,14 @@ class OSM extends BaseObject
     }
   }
   
+  /** Magic method to convert object to string (used wherever an OSM object
+   * used in a context requiring a string).
+   * @return string  of the form "OSM as <username>".
+   */
+  public function __toString() {
+    return "OSM as $this->userId";
+  }
+  
 	/** Fetch all terms for all accessible sections so they are available for other methods.
    * This method should only be called from class Section.
 	 * 
@@ -291,9 +307,8 @@ class OSM extends BaseObject
   public function ApiGetTerms()
   { $this->ApiGetUserRoles();
     $apiTerms = $this->PostAPI( 'api.php?action=getTerms' );
-    //var_dump( $apiTerms );
     foreach ($this->sections as $section)
-    { if (isset($apiTerms->{$section->id})) $section->UseApiGetTerms( $apiTerms->{$section->id} );
+    { if (isset($apiTerms->{$section->id})) $section->ApiUseGetTerms( $apiTerms->{$section->id} );
       else $section->ApiUseGetTerms( array() );
     }
   }
@@ -312,17 +327,53 @@ class OSM extends BaseObject
       // has access.  The contents of each object are described in method
       // Section->ApiUseGetUserRoles
       $apiSections = $this->PostAPI( 'api.php?action=getUserRoles' );
-      //var_dump( $apiSections );
       if (is_array( $apiSections )) {
         foreach ($apiSections as $apiSection) {
           $section = $this->Section( intval( $apiSection->sectionid ) );
-          $section->UseApiGetUserRoles( $apiSection );
+          $section->ApiUseGetUserRoles( $apiSection );
           $this->sections[ $section->id ] = $section;
           if ($this->uiSection == null || $apiSection->isDefault)
             $this->uiSection = $section;
         }
       }
     }
+  }
+
+  /** Search for a scout by name or email in one or more sections.
+   *
+   * @param string $firstName  if truthy, only scouts having this string in
+   *           their first name will be returned.
+   * @param string $lastName  if truthy, only scouts having this string in
+   *           their last name will be returned.
+   * @param string $email  if truthy, only scouts having this string in their
+   *           email address will be returned.
+   * @param Section[]|null $sections  array of sections to be searched.  If null
+   *           or omitted, all available sections will be returned.
+   *
+   * @return Scout[]  array of scouts meeting all the criteria specified in the
+   *           parameters.
+   */
+  public function ApiMemberSearch( $firstName, $lastName, $email, $sections ) {
+    $args = array();
+    if (!$sections) {
+      $this->ApiGetUserRoles();
+      $sections = $this->sections;
+    }
+    $args['sections'] = '[' . implode( ',',
+                array_map( function( $s ) {return $s->id;}, $sections ) ) . ']';
+    if ($firstName) $args['firstname'] = $firstName;
+    if ($lastName) $args['lastname'] = $lastName;
+    if ($email) $args['email'] = $email;
+    $r = $this->PostAPI( 'ext/dashboard/?action=memberSearch', $args );
+    $results = array();
+    foreach ($r->items as $apiItem) {
+      $section = $this->Section( $apiItem->sectionid );
+      $section->ApiUseMemberSearch( $apiItem );
+      $scout = $section->FindScout( $apiItem->scoutid );
+      $scout->SetName( $apiItem->firstname, $apiItem->lastname );
+      $results[] = $scout;
+    }
+    return $results;
   }
  
   /** Forget all cached information.
@@ -331,13 +382,16 @@ class OSM extends BaseObject
    * which a new logged-in user is not entitled to see.  The only known use-case
    * for this is during unit testing.
    */
-  private function ClearCache() {
+  public function ClearCache() {
     foreach ($this->sectionsCache as $section) $section->BreakCache();
     if ($this->myChildren)
       foreach ($this->myChildren as $scout) $scout->BreakCache();
+    $this->badges = array();
     $this->sections = null;
+    $this->section = null;
     $this->myChildren = null;
     $this->sectionsCache = array();
+    $this->uiSection = null;
   }
 
   /** Set the connection's current section.
@@ -381,18 +435,56 @@ class OSM extends BaseObject
   /** Finds the object representing a particular section, creating the object if
    * necessary.
    *
-   * @param int $sectionId  the number used in OSM as the unique identifier for
-   *           a section.
+   * @param int|string $sectionId  the number used in OSM as the unique
+   *           identifier for a section.  If a string, must be numeric.
    *
    * @returns Section the object representing the section.  This object may
    *           have most properties undefined, but any attempt to read a
    *           property will prompt an API call to attempt to populate it.
    */
-  public function Section( int $sectionId ) {
+  public function Section( $sectionId ) {
+    if (is_string( $sectionId )) $sectionId = intval( $sectionId );
     if (!isset( $this->sectionsCache[$sectionId] )) {
       $this->sectionsCache[ $sectionId ] = new Section( $this, $sectionId );
     }
     return $this->sectionsCache[ $sectionId ];
+  }
+
+  /** Finds a scout with the given name.
+   *
+   * @param string|null $firstName  if non-empty, the method will search for a
+   *           scout with this first name.
+   * @param string|null $lastName  if non-empty, the method will search for a
+   *           scout with this last name.
+   *
+   * @return Scout|null  returns a current scout (current in any section
+   *           accessible to the logged-in user) whose name matches the
+   *           arguments, or null if no such scout can be found.  If there are
+   *           multiple matches then one of them will be returned.
+   */
+  public function FindScoutByName( $firstName, $lastName = null ) {
+    $a = $this->ApiMemberSearch( $firstName, $lastName, null, null );
+    if (count( $a ) > 0) return current( $a );
+    return null;
+  }
+
+  /** Finds a section with the given name.
+   *
+   * @param string $name  the name of the section to be returned.
+   *
+   * @return Section|null  if a section with the given name is accessible to the
+   *           logged-in user then it will be returned; otherwise null is
+   *           returned.
+   */
+  public function FindSectionByName( string $name ) {
+    $this->ApiGetUserRoles();
+    foreach ($this->sections as $section) {
+      echo "Checking {$section->name} against $name<br/>\n";
+      if ($section->name == $name) return $section;
+      echo "No match<br/>\n";
+    }
+    echo "No more sections against which to check<br/>\n";
+    return null;
   }
 
   /** Finds a section of a given type (beavers cubs etc).
@@ -475,14 +567,15 @@ class OSM extends BaseObject
 	 * 
 	 * @param string   $url       The URL to query, relative to the base URL
 	 * @param string[] $postArgs  The URL parts, encoded as an associative array
-	 * @param bool  $throwErrors true iff all errors should result in an exception; otherwise
-   *                            certain API errors (e.g. permissions, invalid arguments etc) will
-   *                            be indicated by setting the OSM errorCode and errorMessage
-   *                            properties and returning a null value.
+	 * @param bool  $useApiCache  true iff the API Cache should be used.  This
+   *                            cache will be searched for a result we can use
+   *                            instead of actually making the call and, if we
+   *                            do actually make the call then the result will
+   *                            be saved in the cache.
 	 * 
 	 * @return string[];
 	 */
-	public function PostAPI( $url, $postArgs=array(), $throwErrors = true ) {
+	public function PostAPI( $url, $postArgs=array(), $useApiCache = false ) {
     $this->errorCode = $this->errorMessage = '';
 		if (!$this->curlHandle) $this->curlHandle = curl_init();
   
@@ -497,6 +590,14 @@ class OSM extends BaseObject
     }
 		
 		$data = http_build_query( $postArgs );
+    
+    // Return cached value if requested and available.
+    if ($useApiCache) {
+      if (!array_key_exists( $url, $this->apiCache ))
+        $this->apiCache[$url] = array();
+      if (array_key_exists( $data, $this->apiCache[$url] ))
+        return $this->apiCache[$url][$data];
+    }
     
     curl_setopt( $this->curlHandle, CURLOPT_URL, $this->base . $url );
 		curl_setopt( $this->curlHandle, CURLOPT_POSTFIELDS, $data );
@@ -514,20 +615,21 @@ class OSM extends BaseObject
       echo "Curl returned an error<br/>\n";
       throw new \Exception( curl_error($this->curlHandle) );
     }
-    //echo htmlspecialchars( "JSON for {$this->base}$url is \"$msg\"" ), "<br/><br/>\n";
-		$out = json_decode($msg);
-    // echo "Out for ", htmlspecialchars($url), " is "; var_dump( $out );
-    if (defined('TRACEOSM') && TRACEOSM && isset( $_GET['traceosm'] )) {
-      if (preg_match( $_GET['traceosm'], $url )) {
+   $out = json_decode($msg);
+    if (defined('TRACEOSM')) {
+      if (TRACEOSM == 'true') $traceOSM = $_GET['traceosm'] ?? '';
+      elseif (TRACEOSM == 'false') $traceOSM = '';
+      else $traceOSM = TRACEOSM;
+      if ($traceOSM && preg_match( $traceOSM, $url )) {
         echo "\n<h2>", htmlspecialchars( $url ), "</h2>";
+        echo "<p>Post Args: ", htmlspecialchars( $data ), "</p>\n";
         echo "<pre>\n", htmlspecialchars( json_encode( $out, JSON_PRETTY_PRINT ) ), "</pre>\n";
+        echo "<p>End of response to ", htmlspecialchars( $url ), "</p>\n";
       }
     }
 
     if (is_object( $out )) {
       if (isset( $out->error )) {
-        //echo htmlspecialchars( $this->base . $url ), "<br/>\n";
-        //var_dump( $out );
         if (is_string( $out->error )) {
           $this->errorCode = 'Unset';
           $this->errorMessage = $out->error;
@@ -537,11 +639,15 @@ class OSM extends BaseObject
         }
         return null;
       }
+      if ($useApiCache) $this->apiCache[$url][$data] = $out;
       return $out;
     } else if ($out === false || $out === null)
       // Logged in user doesn't have permission to use this API so indicate this by returning null
       return null;
-    else if (is_array( $out )) return $out;
+    else if (is_array( $out )) {
+      if ($useApiCache) $this->apiCache[$url][$data] = $out;
+      return $out;
+    }
     throw new Exception( "OSM returned unexpected content" );
 	}
 
@@ -702,6 +808,10 @@ class Badge extends BaseObject
   
   /** @var integer  key for sorting badges */
   private $order;
+  
+  /** @var string  url (relative to OSM's base URL) of a picture of this badge.
+   */
+  private $picture = null;
 
   /** @var Requirement[]  array of requirements for this badge, indexed by field Id */
   private $requirements;
@@ -724,6 +834,7 @@ class Badge extends BaseObject
    *           indexed by badge name, with elements which are arrays, indexed by
    *           area name, of integers giving the number of elements of that
    *           area which must be completed.
+   */
   static public $rules = ['beavers'=>['Outdoors'=>['a'=>2],
                                       'Skills'=>['b'=>3,'c'=>3],
                                       'World'=>['d'=>4]
@@ -745,7 +856,7 @@ class Badge extends BaseObject
   public function __construct( $idv ) {
     $this->idv = $idv;
   }
-  
+
   /** Return a virtual property of the Badge.
    *
    * Several private properties of the Badge are made available outside the
@@ -754,7 +865,8 @@ class Badge extends BaseObject
    * if the property is never used.
    *
    * @param string $property  The name of the property to fetch.
-   * @returns mixed
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
    */
   public function __get( $property ) {
     switch ($property) {
@@ -771,15 +883,29 @@ class Badge extends BaseObject
     }
   }
   
-  /** Convert object to string (used whereever a Badge is used in a context
-   * requiring a string).
-   * @return string  simply returns the name of the badge, optionally followed
-   *           by the group name in parentheses.
+  /** Magic method to convert object to string (used wherever a Badge is used in
+   * a context requiring a string).
+   * @return string  simply returns the name of the badge, possibly followed by
+   *           the name of the badge group in parentheses.
    */
   public function __toString(): string {
     $s = $this->name;
     if ($this->group) $s .= " ({$this->group})";
     return $s;
+  }
+
+  /** Set Badge details from information returned by API call BadgesPyPerson.
+   * The API call may return the same badge multiple times (for different
+   * scouts) but the badge details should be the same each time.
+   *
+   * @param stdClass $apiBadge  an element in the 'badges' array returned for
+   *           a scout by the API call.
+   */
+  public function ApiUseBadgesByPerson( $apiBadge ) {
+    $this->name = $apiBadge->badge;
+    $this->type = $apiBadge->badge_group;
+    $this->picture = $apiBadge->picture;
+    $this->id = $apiBadge->badge_id;
   }
 
   /** Populate the private properties of the badge using data returned by API
@@ -796,25 +922,35 @@ class Badge extends BaseObject
     $this->group = $apiData->group_name;
     $this->type = $apiData->type_id;
     $this->requirements = array();
-    foreach ($apiTasks[1]->rows as $field) {
-      $this->requirements[$field->field] = new Requirement( $this, $field );
+    foreach ($apiTasks[0]->rows as $field) {
+      if (property_exists( $field, 'tooltip' ))
+        $this->requirements[$field->field] = new Requirement( $this, $field );
     }
   }  
 }
 
 /** The work done towards a badge by a scout */
 class BadgeWork {
-  /** @var bool  True iff the badge has been awarded. */
-  public $awarded;
+  /** @var int  For most badges, this is zero if not awarded and one if
+   * the badge has been awarded.  For staged activity badges it gives the level
+   * which has been awarded. */
+  private $awarded;
+
+  /** @var Date|null  The date the badge was awarded (or, for a staged badge,
+   * the date of the highest level awarded so far).  Null if the scout doesn't
+   * yet have the badge. */
+  private $dateAwarded = null;
 
   /** @var Badge  the badge for which this object records progress. */
   public  $badge;
   
-  /** @var bool  True iff the badge has been completed. */
-  public $completed;
+  /** @var int  For most badges, this is zero if not completed and one if
+   * all necessary elements of the badge have been completed.  For staged
+   * activity badges it gives the level which has been completed. */
+  private $completed;
   
   /** @var string[]  array of progress notes, indexed by the badge's requirement ids. */
-  public $progress;
+  private $progress;
   
   /** @var Scout  the scout who has done this badge work. */
   public $scout;
@@ -824,25 +960,63 @@ class BadgeWork {
    * @param Scout $scout  the scout who is attempting or has attempted the
    *           badge.
    * @param Badge $badge  the badge being attempted.
-   * @param \stdClass $apiItem  an element of the items array returned by an API
-   *           call (in method Term::ApiGetBadgeRecords) with action
-   *           getBadgeRecords.
    */
-  public function __construct( Scout $scout, Badge $badge, \stdClass $apiItem ) {
-    assert( $scout->id == $apiItem->scoutid );
+  public function __construct( Scout $scout, Badge $badge ) {
     $this->scout = $scout;
     $this->badge = $badge;
-    $this->completed = $apiItem->completed != 0;
-    $this->awarded = $apiItem->awarded != 0;
+  }
+  
+  /** Return a virtual property of the BadgeWork.
+   *
+   * Several private properties of the BadgeWork are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
+   */
+  public function __get( $property ) {
+    switch ($property) {
+      default:
+        throw new \Exception( "BadgeWork->$property not found" );
+    }
+  }
+
+  /** Fill properties of this BadgeWork object using information returned by a
+   * API call to BadgesByPerson.
+   *
+   * @param stdClass $apiBadge  an element of the 'badges' array for a scout
+   *           featuring in the 'data' array returned by the API call.
+   */
+  public function ApiUseBadgesByPerson( $apiBadge ) {
+    $this->completed = intval( $apiBadge->completed );
+    $this->awarded = intval( $apiBadge->awarded );
+    if ($apiBadge->awarded_date == -1) $this->dateAwarded = null;
+    else $this->dateAwarded = date_create( '@' . $apiBadge->awarded_date );
+    $this->fraction = floatval( $apiBadge->status );
+  }
+
+  /** Fill properties of this BadgeWork object using information returned by a
+   * API call to GetBadgesRecords for one badge for all scouts in a term.
+   *
+   * @param stdClass $apiBadge  an element of the 'items' array returned by the
+   *           API call.  Each such element describes one scout and the work
+   *           they have done for the badge being queried.
+   */
+  public function ApiUseGetBadgeRecords( $apiBadge ) {
+    $this->completed = $apiBadge->completed != 0;
+    $this->awarded = $apiBadge->awarded != 0;
     $this->progress = array();
-    foreach ($badge->requirements as $id => $requirement) {
+    foreach ($this->badge->requirements as $id => $requirement) {
       $propertyName = '_' . $id;
-      if (property_exists( $apiItem, $propertyName ))
-        $this->progress[$id] = $apiItem->$propertyName;
+      if (property_exists( $apiBadge, $propertyName ))
+        $this->progress[$id] = $apiBadge->$propertyName;
       else $this->progress[$id] = null;
     }
   }
- 
+
   /** Return the text entered against a particular requirement for this scout's
    * work towards this badge.
    * The badge and scout concerned are given by the corresponding properties.
@@ -909,6 +1083,176 @@ class BadgeWork {
       if ($r->area == $requirement->area && $this->HasMet( $r )) $count++;
     }
     return $count >= $rules[$requirement->area];
+  }
+}
+
+/** Objects of class Contact act as containers for address & 'phone information
+ * for scouts, their primary contacts, their emergency contacts and their
+ * doctors.
+ *
+ * @property string $address1  first line of address
+ * @property-read string $address1  second line of address
+ * @property-read string $address1  third line of address
+ * @property-read string $address4  fourth line of address
+ * @property-read string $email1  email for this contact
+ * @property-read string $email2  alternative email for this contact
+ * @property-read string $firstName  first name of contact (null for Member
+ *           contact)
+ * @property-read string $lastName   last name of contact (null for Member
+ *           contact)
+ * @property-read Date $lastUpdated  date this contact was last updated
+ * @property-read string $lastUpdatedBy  name of person who last updated this
+ *           contact
+ * @property-read string $phone1  telephone number for this contact
+ * @property-read string $phone2  alternative telephone number for this contact
+ * @property-read string $postcode  post code
+ */
+class Contact extends CustomData
+{
+  /** Magic method to convert object to string (used wherever a Contact is
+   * used in a context requiring a string).
+   * @return string  Name of the contact e.g. "Andrew Fisher".  If no last name
+   *           is present then the scout's last name will be used.
+   */
+  public function __toString() {
+    return $this->firstName . ' ' . ($this->lastName ?: $this->scout->lastName);
+  }
+}
+
+/** Custom Data associated with a scout.  The object will support a virtual
+ * property for each property supplied by the API (but not that we rename some
+ * properties (firstname, lastname, last_updated_by and last_updated_time) to
+ * use CamelCases.
+ * Each Scout will typically have a CustomData object for each Contact (member,
+ * primary1, primary2, emergency or doctor) as well as CustomData objects
+ * containing other standard and user-defined properties.
+ * Note that if two scouts share the same contact details (e.g. siblings) then
+ * each scout will still have distinct contact objects.
+ */
+class CustomData extends BaseObject
+{
+  /** @var mixed[]  properties of the contact, indexed by property name.  The
+   * properties defined depend upon the contact type (e.g. the 'doctor' contact
+   * has a property 'surgery'; also, users can define extra properties with
+   * names starting 'cf-'.
+   * Note also that we rename properties firstname, lastname, last_updated_by
+   * and last_updated_time to use CamelCase. */
+  protected $properties = array();
+  
+  /** @var Scout the scout for whom this is a contact. */
+  protected $scout;
+  
+  /** @var string identifying which contact this is ('member', 'primary1' or
+   *           'primary2').
+   */
+  private $type;
+ 
+   
+  /** Magic method to convert object to string (used wherever a CustomData is
+   * used in a context requiring a string).
+   * @return string  the word CustomData with all the properties and their
+   *           values listed in brackets.
+   */
+  public function __toString() {
+    $s = "CustomData (";
+    foreach ($this->properties as $property => $value) {
+      $s .= "$property = $value,";
+    }
+    return substr( $s, 0, -1 ) . ")";
+  }
+
+  /** Constructor for CustomData objects
+   *
+   * @param $scout  the scout to whom the CustomData object relates.
+   * @param $apiObj the object returned by an 'customdata' API call for the
+   *           given scout.
+   */
+  public function __construct( Scout $scout, \stdClass $apiObj ) {
+    $this->scout = $scout;
+    foreach ($apiObj->columns as $column) {
+      $varName = $column->varname;
+      switch ($varName) {
+        case 'firstname':
+          $varName = 'firstName';
+          break;
+        case 'lastname':
+          $varName = 'lastName';
+          break;
+        case 'last_updated_by':
+          $varName = 'lastUpdatedBy';
+          break;
+        case 'last_updated_time':
+          $varName = 'lastUpdated';
+          break;
+      }
+      if ($column->type == 'last_updated') {
+        $this->properties[$varName] = date_create( $column->value );
+      } elseif ($column->type == 'select' &&
+                (($column->config->options->Yes ?? '') == 'Yes' ||
+                 ($column->config->options->No ?? '') == 'No')) {
+          $this->properties[$varName] = $column->value == 'Yes';
+      } else
+        $this->properties[$varName] = $column->value;
+    }
+  }
+
+  /** Return a virtual property of the CustomData.
+   *
+   * Several private properties of the CustomData are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.  The set of properties defined depends upon
+   * which CustomData is concerned.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
+   */
+  public function __get( $property ) {
+    if (array_key_exists( $property, $this->properties )) {
+      return $this->properties[$property];
+    }
+    switch ( $property ) {
+      case 'firstName':
+      case 'lastName':
+        return $this->scout->{$property};
+      case 'scout':
+        return $this->scout;
+    }
+    return $this->GetExtra( $property );
+  }
+
+  /** Does this CustomData object support a named field?
+   *
+   * @param string $property  the name of the property of interest
+   *
+   * @return bool  true iff this CustomData object supports the named field.
+   *          Note, for example, that a the CustomData for additional
+   *          information will have very different fields to that for a
+   *          Contact, and that a particular section can also define additional
+   *          user-defined fields.
+   */
+  public function FieldEnabled( $property ) {
+    if (array_key_exists( $property, $this->properties )) return true;
+    return array_key_exists( 'cf_'.$property, $this->properties );
+  }
+
+  /** Returns a user-defined field.
+   *
+   * Usually one can simply access user-defined fields as though they were
+   * normal OSM-defined fields of the CustomData object; this method allows you
+   * to access a user-defined field even when its name clashes with an
+   * OSM-defined field.
+   *
+   * @param string $property  the name of the field.
+   *
+   * @returns string  the value of the field
+   */
+  public function GetExtra( $property ) {
+    if (array_key_exists( 'cf_'.$property, $this->properties )) {
+      return $this->properties['cf_'.$property];
+    }
+    throw new \Exception( "Unknown property $property for Contact" );
   }
 }
 
@@ -985,10 +1329,10 @@ class Event extends BaseObject
                                                                                                null;
   }
  
-  /** Convert object to string (used whereever an Event is used in a context
-   * requiring a string).
-   * @return string  simply returns the name of the Event, optionally followed
-   *           by the start date in parentheses.
+  /** Magic method to convert object to string (used wherever an Event is used
+   * in a context requiring a string).
+   * @return string  the name of the Event, possibly followed by the start date
+   *           in parentheses.
    */
   public function __toString(): string {
     if ($this->startDate) return $this->name . " on " . $this->startDate->format( 'j-M-Y' );
@@ -1180,12 +1524,18 @@ class EventAttendance extends BaseObject
       $this->columns[$k] = $apiObject->{$k};
     }
   }
-  
-  /** Magic method called when a non-existant property is read (or a private one
-   * is read from outside the class).
-   * @param string $property  the name of the (virtual) property being accessed.
-   * @returns mixed  the value of the (virtual) property.
-   */   
+
+  /** Return a virtual property of the attendance.
+   *
+   * Several private properties of the Attendance are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
+   */
   public function __get( $property ) {
     switch ($property) {
       // The following are set in the constructor, so are always valid
@@ -1209,7 +1559,83 @@ class EventAttendance extends BaseObject
     if ($fname && array_key_exists( $fname, $this->columns )) return $this->columns[$fname];
     return null;
   }
-}  
+}
+
+/** A patrol within a section.
+ */
+class Patrol extends BaseObject {
+  
+  /** @var integer  the id of this patrol.
+   * It is believed that, apart from the special ids (-2,-3) for the leaders and
+   * young leaders patrols, these ids are unique across the entire system but we
+   * do not depend upon this.
+   */
+  private $id = null;
+
+  /** @var string  the name of the patrol.  Examples might be "Red", "Panther"
+   *            or "Leaders".
+   */
+  private $name = null;
+
+  /** @var int  the total number of points for the patrol.
+   */
+  private $points = null;
+
+  /** @var Section  the section of which this patrol is a part.
+   */
+  private $section;
+
+  /** Constructor for Patrol objects.
+   *
+   * @param string|int $id  the patrol's identifier.  This is believed to be unique
+   *           across all sections, except for ids -2 and -3 which refer to the
+   *           leader and young leader patrols in every section.  If this is a
+   *           string, it must be string representation of an integer.
+   * @param Section $section  the section of which the Patrol forms a part.
+   */
+  public function __construct( $id, Section $section ) {
+    assert( is_numeric( $id ) );
+    $this->id = is_string( $id ) ? intval( $id ) : $id;
+    $this->section = $section;
+  }
+
+  /** Return a virtual property of the Patrol.
+   *
+   * Several private properties of the Patrol are made available outside the
+   * class through this method.  These properties can then be initialised by
+   * making an API call without the overhead of making an (expensive) API call
+   * if the property is never used.
+   *
+   * @param string $property  The name of the property to fetch.
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
+   */
+  public function __get( $property ) {
+    switch ($property) {
+      case 'id':
+      case 'name':
+      case 'points':
+        if ($this->$property === null ) $this->section->ApiGetPatrols();
+        return $this->$property;
+      default:
+        throw new exception( "Patrol->$property not found" );
+    }
+  }
+
+  /** Populate properties of the Patrol returned by the API call GetPatrols.
+   *
+   * @param stdClass $apiPatrol  an element of the 'patrols' array returned by
+   *           the GetPatrols API call which contains information about a
+   *           patrol.
+   */
+  public function ApiUseGetPatrols( $apiPatrol ) {
+    assert( $this->id == $apiPatrol->patrolid );
+    assert( $this->section->id == $apiPatrol->sectionid ||
+                            -2 == $apiPatrol->sectionid );
+    $this->name = $apiPatrol->name;
+    $this->points = intval( $apiPatrol->points );
+  }
+}
 
 /** A Requirement for a badge (corresponds to a column on the Badge's page in
  *  the OSM user interface.
@@ -1262,11 +1688,10 @@ class Requirement extends BaseObject {
     $this->description = $apiField->tooltip;
     $this->area = $apiField->module;
   }
-  
-  /** Convert object to string (used whereever a Requirement is used in a
-   * context requiring a string).
-   * @return string  simply returns a phrase of the form "{requirement} for
-   *           {badge} badge.
+
+  /** Magic method to convert object to string (used wherever a Requirement is
+   * used in a context requiring a string).
+   * @return string  a phrase of the form "{requirement} for {badge} badge"
    */
   public function __toString(): string {
     return $this->name . ' for ' . $this->badge->name . ' badge';
@@ -1282,38 +1707,107 @@ class Requirement extends BaseObject {
  *
  * Scouts are initially created with almost no content and properties are set from the results of
  * various API calls.
+ *
+ * @property-read string $allergies  Allergies recorded for this scout.
+ *           The value of this virtual property is found in CustomData object
+ *           containing Essential Information.
+ * @property-read string $dietary  Dietary requirements for this scout.
+ *           The value of this virtual property is found in CustomData object
+ *           containing Essential Information.
+ * @property-read string $gender  Scout's gender.  Many values are possible, but
+ *           'Male', 'Female' and '' are the most common.
+ * @property-read DateTime $lastUpdated the date and time this scout's record
+ *           was last updated.
+ * @property-read string $lastUpdatedBy  the name of the person who last updated
+ *           this scout's record.
+ * @property-read string $medical  Medical information (other than allergies)
+ *           for this scout.  The value of this virtual property is found in the
+ *           CustomData object containing Essential Information.
+ * @property-read string $school  School attended by this scout.  The value of
+ *           this virtual property is found in CustomData object containing
+ *           Essential Information.
+ * @property-read bool|null $swimmer  Indicates whether this scout can swim.  A
+ *           blank value indicates that we do not know.  The value of this
+ *           virtual property is found in CustomData object containing
+ *           Essential Information.
+ * @property-read string $tetanus  Year of this scout's most recent tetanus
+ *           vaccination.  The value of this virtual property is found in
+ *           CustomData object containing Essential Information.
  */
 class Scout extends BaseObject
-{ /** Has ApiGetIndividual been called to fill in those fields it can?  If the call fails for a
+{
+  /** Has ApiGetIndividual been called to fill in those fields it can?  If the call fails for a
    * particular member this will still be set to true so that we avoid making multiple calls to get
    * data we are not authorised to see. */
   private $apiGotIndividual = false;
+  
+  /** @var bool  true iff the API has been called to discover all the badges
+   * for this scout. */
+  private $badgeWorkComplete = false;
 
   /** @var BadgeWork[string] array of objects (indexed by badge id & version) showing the progress
    *            made by this scout towards various badges.  This array will be populated as required
-   *            during calls to method BadgeWork.
+   *            during calls to method BadgeWork and/or AllBadgeWork.
    */
   private $badgeWork = array();
 
-  /** @var \stdClass|null  The custom data for a scout.  This will contain
-   *           things like email, telephone and address data for contacts as
-   *           well as additional data like medical and consent records.  Will
-   *           be null if the API has not yet been interrogated for these data.
+  /** @var CustomData|null  CustomData object containing the consents given by
+   * the parents of the current scout.
+   * This property will be set (by method __get calling ApiCustomData) when it
+   * is accessed.
    */
-  private $customData = null;
+  private $consents = null;
   
   /** @var Date|null  Date of birth.  Accessible via __get method which will query the API to populate
    *  this and other properties if access is attempted. */
   private $dob = null;
+  
+  /** @var Date|null  Date this scout joined Scouting (in any section, anywhere)
+   * null if API has not been interrogated for this information.
+   */
+  private $dateJoinedMovement = null;
+   
+  /** @var Date|null  Date this scout left the section.  Null may indicate the
+   * scout has not left or may indicate the API has not yet been interrogated.
+   */
+  private $dateLeftSection = null;   
 
   /** @var Date|null  Date this scout started in the section.
    */
   private $dateStartedSection = null;
 
+  /** @var Contact Contact details for this scout's doctor */
+  private $doctor = null;
+
+  /** @var Contact  this scout's emergency contact */
+  private $emergency = null;
+
+  /** @var CustomData|null  The Essential information for this scout.  This
+   *           object is created and populated by a call of ApiCustomData and
+   *           its properties are made available as virtual properties of the
+   *           scout.
+   */
+  private $essentials = null;
+  
+  /** @var mixed[]  array of additional fields defined by the user */
+  private $extra = array();
+
   /** @var string|null  First name of scout.  Null indicates the API has not yet
    *           been interrogated to discover this.
    */
   private $firstName = null;
+ 
+  /** @var string|null  Attempting to access the virtual property of the same
+   *           name will cause this to be set from a CustomData object called
+   *           'Additional' (not to be confused with 'Additional Information'.
+   */   
+  private $gender = null;
+
+  /** @var bool  is true iff method ApiCustomData has been called on this scout
+   *           to retrieve all the custom data for the scout (contacts,
+   *           essential information, consents, etc)
+   */
+  private $gotApiCustomData = false;
 
   /** @var int  Unique id of scout.
    *
@@ -1321,7 +1815,7 @@ class Scout extends BaseObject
    * id in the case that the same person is a scout in two sections.
    */
   public $id;
-
+ 
   /** @var bool true iff this scout is one of the logged-in users children
    *  accessible through 'My Children' in the standard OSM interface.
    */
@@ -1331,15 +1825,60 @@ class Scout extends BaseObject
    *           been interrogated to discover this.
    */
   private $lastName = null;
+
+  /** @var DateTime|null  Either gives the value of virtual property
+   *           lastUpdated, or is null to indicate that the API doesn't have a
+   *           value for that property.
+   */
+  private $lastUpdated = null;
+
+  /** @var string|null  Either gives the value of virtual property
+   *           lastUpdatedBy, or is null to indicate that the API doesn't have a
+   *           value for that property.
+   */
+  private $lastUpdatedBy = null;
   
+  /** @var string|null  Attempting to access the virtual property of the same
+   *           name will cause this to be set from a CustomData object called
+   *           'Essentials'.
+   */   
+  private $medical = null;
+
+  /** @var Contact Contact details for this scout themself */
+  private $member = null;
+    
   /** @var OSM the OSM object used to access this event */
   private $osm;
   
-  /** @var integer  the id of the patrol this member is in, or null to indicate we have not queried
-   * the API for this information.  Some special patrol ids are defined:
-   *            -2: leaders patrol
+  /** @var string  Other useful information about the scout */
+  private $other = null;
+  
+  /** @var Patrol|null  the patrol this member is in, or null to indicate we
+   * have not queried the API for this information. */
+  private $patrol = null;
+  
+  /** @var integer|null Permitted value are 0=>Normal, 1=>APL, 2=PL, 3=SPL,
+   * null=API not interrogated.
    */
-  private $patrolId = null;
+  private $patrolLevel = null;
+  
+  /** @var string A Globally Unique identifier for the uploaded photo of the
+   * scout.  May be used to create the URL of the photograph.
+   */
+  private $photoGUID = null;
+
+  /** @var Contact  This scout's primary contact (typically a parent) */
+  private $primary1 = null;
+
+  /** @var Contact  This scout's alternative primary contact (typically the
+   *           other parent) */
+  private $primary2 = null;
+
+  /** @var string|null  Attempting to access the virtual property of the same
+   *           name will cause this to be set from a CustomData object called
+   *           'Essentials'.
+   */   
+  private $school = null;
   
   /** @var integer  the section in which this scout is a member.  If the same
    * person is a member in two sections (either simultaneously or sequentially)
@@ -1349,6 +1888,23 @@ class Scout extends BaseObject
    * will also differ.
    */
   public $section;
+  
+  /** @var bool|null  Attempting to access the virtual property of the same
+   *           name will cause this to be set from a CustomData object called
+   *           'Essentials'.
+   */   
+  private $swimmer;
+
+  /** @var Term|null  a term in which this Scout was current; may be null if no
+   * such term exists in the scout's section or if we haven't yet looked for it.
+   */
+  private $term = null;
+  
+  /** @var string|null  Attempting to access the virtual property of the same
+   *           name will cause this to be set from a CustomData object called
+   *           'Essentials'.
+   */   
+  private $tetanus = null;
 
   /** Construction function for Scout
    *
@@ -1356,16 +1912,23 @@ class Scout extends BaseObject
    * @param int $scoutId  the unique id of the scout.  Note that although this
    *           id is unique to the scout it may be shared by several Scout
    *           objects representing the same scout in different sections.
+   * @param string|null $firstName  the first (given) name of the scout, or null
+   *           if not known.
+   * @param string $lastName  the last (family) name of the scout, or null if
+   *           not known.
    *
    * @return Scout Note that the scout as returned has almost no properties set.
    *           If further information about the scout is available it should be
    *           added by calling one of the Api... methods depending upon which
    *           API was used to discover the scout.
    */
-  public function __construct( Section $section, int $scoutId ) {
+  public function __construct( Section $section, int $scoutId,
+                           string $firstName = null, string $lastName = null ) {
     $this->section = $section;
     $this->osm = $section->osm;
     $this->id = $scoutId;
+    $this->firstName = $firstName;
+    $this->lastName = $lastName;
   }
 
   /** Return a virtual property of the Scout.
@@ -1376,74 +1939,154 @@ class Scout extends BaseObject
    * if the property is never used.
    *
    * @param string $property  The name of the property to fetch.
-   * @returns mixed
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
    */
   public function __get( $property ) {
     switch ($property) {
+      case 'dateJoinedMovement':
+      case 'dateLeftSection':
       case 'dateStartedSection':
       case 'dob':
       case 'firstName':
       case 'lastName':
+      case 'patrol':
+      case 'patrolLevel':
         if ($this->$property === null) $this->ApiGetIndividual();
         return $this->$property;
-      case 'patrolId':
-        return $this->getPatrolId();
-      case 'customData':
-       if ($this->customData === null) {
-             $this->ApiCustomData();
-       }
-       return $this->customData;
+      case 'patrolLevelAbbr':
+        if ($this->patrolLevel === null) $this->ApiGetIndividual();
+        return $this->section->PatrolLevelAbbr( $this->patrolLevel );
+      case 'patrolLevelName':
+        if ($this->patrolLevel === null) $this->ApiGetIndividual();
+        return $this->section->PatrolLevelName( $this->patrolLevel );
+      case 'gender':
+      case 'member':
+      case 'primary1':
+      case 'primary2':
+      case 'emergency':
+      case 'doctor':
+      case 'consents':
+      case 'gender':
+      case 'lastUpdated':
+      case 'lastUpdatedBy':
+       if ($this->$property === null) $this->ApiCustomData();
+       if ($this->$property === null) echo "No $property for $this<br/>\n";
+       return $this->$property;
+      case 'allergies':
+      case 'dietary':
+      case 'medical':
+      case 'other':
+      case 'school':
+      case 'swimmer':
+      case 'tetanus':
+        if ($this->essentials === null) $this->ApiCustomData();
+        if ($this->essentials->FieldEnabled( $property )) {
+          return $this->essentials->$property;
+        }
+        return null;
       default:
-        throw new \Exception( "Scout->$property not found" );
+        $this->ApiCustomData();
+        if ($this->extra->FieldEnabled( 'cf_'.$property )) {
+          return $this->extra->{'cf_'.$property};
+        }
+        throw new \Exception( "Cannot read property $property for $this" );
     }
   }
 
-  /** Convert object to string (used wherever a Scout is used in a context
-   * requiring a string).
-   * @return string  simply returns the name of the scout, if available,
-   *           otherwise returns id in the form "Scout {id}".
+  /** Magic method to convert object to string (used wherever a Scout is used in
+   * a context requiring a string).
+   * @return string  the name of the scout, if available, otherwise returns id
+   *           in the form "Scout {id}".
    */
   public function __toString()
   { if ($this->firstName === null) return "Scout {$this->id}";
     return $this->Name();
   }
+  
+  /** Returns scout's age, on a particular date, in complete months.  I.e. if
+   * their twelve birthday is the next day the result will be 143.
+   *
+   * @param DateTime|null $d  the date for which the age should be computed.  If
+   *           null or omitted, today's date will be used.
+   * @return int  the age of the scout in complete months, or null if this is
+   *           not known.
+   */
+  public function AgeInMonths( DateTime $d = null ) :int {
+    if (!$this->dob) return null;
+    if (!$d) $d = date_create();
+    $age = $d->diff( $this->dob );
+    return 12*$age->y + $age->m;
+  }
 
+  /** Call API endpoint to fetch list of badges held (or being worked on) by
+   * this scout.  Minimal information about progress on each badge is retrieved.
+   *
+   * Warning: this method is not full implemented.  You might choose to use
+   * Term->ApiBadgesByPerson as an alternative where the logged-in user has
+   * leader access.
+   */
+  public function ApiBadgesGetSummary() {
+    $r = $this->osm->PostAPI( "ext/mymember/badges/?action=getSummary",
+                              array( 'member_id'=>$this->id,
+                                     'section_id'=>$this->section->id ) );
+    throw new \Exception( "Not implemented" );
+  }
+  
   /** Fetches custom data about the member.  This includes the member's contact
    * details, together with their primary, secondary and emergency contacts etc.
    */
-  private function ApiCustomData()
-  { if ($this->customData !== null) return;
-    $this->customData = new \stdClass();
+  private function ApiCustomData() {
+    if ($this->gotApiCustomData) return;
     if ($this->section->Permissions( 'member' ) > 0)
       $apiData = $this->osm->PostAPI( "ext/customdata/?action=getData&section_id={$this->section->id}",
                               array( 'associated_id'=>$this->id, 'associated_type'=>'member',
-                                     'context'=>'members', 'group_order'=>'section' ), false );
+                                     'context'=>'members', 'group_order'=>'section' ) );
     elseif ($this->isMyChild) {
       $apiData = $this->osm->PostAPI( "ext/customdata/?action=getData&section_id={$this->section->id}",
                               array( 'associated_id'=>$this->id, 'associated_type'=>'member',
-                                     'context'=>'mymember', 'group_order'=>'section' ), false );
-    }                              
+                                     'context'=>'mymember', 'group_order'=>'section' ) );
+    }
     if ($apiData && $apiData->data) {
-      $apiData = $apiData->data;
-      // var_dump( $apiData );
-      foreach ($apiData as $apiGroup)
-      { $group = new \stdClass();
-        $group->name = $apiGroup->name;
-        foreach ($apiGroup->columns as $apiColumn) {
-          if ($apiColumn->type == 'checkbox')
-            $group->{$apiColumn->varname} = $apiColumn->value == 'yes' ? true : false;
-          else switch ($apiColumn->varname) {
-            case 'firstname':
-            case 'lastname':
-              $group->{$apiColumn->varname} = trim( $apiColumn->value );
-              break;
-            default:
-              $group->{$apiColumn->varname} = $apiColumn->value;
-          }
+      foreach ($apiData->data as $apiGroup) {
+        switch ($apiGroup->group_id) {
+          case 1:
+            $this->primary1 = new Contact( $this, $apiGroup );
+            break;
+          case 2:
+            $this->primary2 = new Contact( $this, $apiGroup );
+            break;
+          case 3:
+            $this->emergency = new Contact( $this, $apiGroup );
+            break;
+          case 4:
+            $this->doctor = new Contact( $this, $apiGroup );
+            break;
+          case 5: // Fields added by user
+            $this->extra = new CustomData( $this, $apiGroup );
+            break;
+          case 6:
+            $this->member = new Contact( $this, $apiGroup );
+            break;
+          case 7:
+            $additional = new CustomData( $this, $apiGroup );
+            $this->gender = $additional->gender;
+            break;
+          case 8:
+            $singular = new CustomData( $this, $apiGroup );
+            $this->lastUpdatedBy = $singular->lastUpdatedBy;
+            $this->lastUpdated = $singular->lastUpdated;
+            break;
+          case 9:
+            $this->essentials = new CustomData( $this, $apiGroup );
+            break;
+          case 10:
+            $this->consents = new CustomData( $this, $apiGroup );
+            break;
         }
-        $this->customData->{$apiGroup->identifier} = $group;
       }
     }
+    $this->gotApiCustomData = true;
   }
 
   /** Populate properties of the scout supplied by API call GetAttendance.
@@ -1455,14 +2098,13 @@ class Scout extends BaseObject
    *                     be the same in all sections.
    *           firstname string
    *           lastname string
-   *           patrolid  numeric string identifying the scout's patrol.  The leaders patrol always
-   *                     has id -2.
+   *           patrolid  numeric string identifying the scout's patrol.
    */
   public function ApiUseGetAttendance( \stdClass $apiObject ) {
     assert( $this->id == $apiObject->scoutid );
     $this->firstName = $apiObject->firstname;
     $this->lastName = $apiObject->lastname;
-    $this->patrolId = $apiObject->patrolid;
+    $this->patrol = $this->section->Patrol( $apiObject->patrolid );
   }
   
   /** Populate details of a scout and his badge work using the result of an API
@@ -1473,7 +2115,9 @@ class Scout extends BaseObject
    */
   public function ApiUseGetBadgeRecords( Badge $badge, \stdClass $apiItem ) {
     $this->SetName( $apiItem->firstname, $apiItem->lastname );
-    $this->badgeWork[$badge->idv] = new BadgeWork( $this, $badge, $apiItem );
+    if (!array_key_exists( $badge->idv, $this->badgeWork ))
+      $this->badgeWork[$badge->idv] = new BadgeWork( $this, $badge );
+    $this->badgeWork[$badge->idv]->ApiUseGetBadgeRecords( $apiItem );
   }
   
   /** Make a call to API post ext/members/contact/?action=getIndividual and use the result to
@@ -1497,8 +2141,9 @@ class Scout extends BaseObject
     * created_date  date and time this record was created, in the form 'YYYY-MM-DD HH:MI:SS'.
     * last_accessed date and time this record was last access, in the form 'YYYY-MM-DD HH:MI:SS'.  It
     *           is not quite clear what constitutes 'access'.  Not used at present.
-    * patrolid  the id of the patrol in which this scout is a member.  Patrols are specific to a
-    *           section, except id '-2' which is the leaders patrol in all sections.
+    * patrolid  the id of the patrol in which this scout is a member.  Patrols
+    *           are specific to a section, except ids '-2' and '-3' which are
+    *           is the leaders and young leaders patrols in all sections.
     * patrolleader small integer indicating role in patrol: 0=>member, 1=>second; 2=>sixer.  Not used
     *           at present.
     * startedsection   date joined this section, in form 'YYYY-MM-DD'.
@@ -1523,11 +2168,43 @@ class Scout extends BaseObject
         $this->dob = date_create( $apiData->dob );
         $this->firstName = $apiData->firstname;
         $this->lastName = $apiData->lastname;
-        $this->patrolId = $apiData->patrolid;
+        $this->patrol = $this->section->Patrol( $apiData->patrolid );
+        $this->patrolLevel = intval( $apiData->patrolleader );
+        $this->dateJoinedMovement = date_create( $apiData->started );
         $this->dateStartedSection = date_create( $apiData->startedsection );
+        $this->dateLeftSection = $apiData->enddate === null ? null :
+                                 date_create( $apiData->enddate );
     } }
   }
-
+  
+  /** Populate properties of the scout, including badgework, returned by a call
+   * of ApiBadgesByPerson for a term when this scout is a member.
+   *
+   * This method also creates Badge objects as required.
+   *
+   * @param stdClass $apiScout  an element of the 'data' array returned by the
+   *           API.  Each such element gives information about a single scout
+   *           and all their badge work (but omits details about exactly which
+   *           requirements have been met).
+   */
+  public function ApiUseBadgesByPerson( $apiScout ) {
+    $this->firstName = $apiScout->firstname;
+    $this->lastName = $apiScout->lastname;
+    assert( $this->id == (int) $apiScout->scout_id );
+    $this->photoGUID = $apiScout->photo_guid;
+    $this->patrol = $this->section->Patrol( $apiScout->patrolid );
+    $this->patrolLevel = $apiScout->patrolleader;
+    $this->dob = date_create( $apiScout->dob );
+    assert( $this->section->id === (int) $apiScout->sectionid );
+    foreach ($apiScout->badges as $apiBadge) {
+      $badge = $this->osm->Badge( $apiBadge->badge_identifier );
+      $badge->ApiUseBadgesByPerson( $apiBadge );
+      if (!array_key_exists( $badge->id, $this->badgeWork))
+        $this->badgeWork[$badge->id] = new BadgeWork( $this, $badge );
+      $this->badgeWork[$badge->id]->ApiUseBadgesByPerson( $apiBadge );
+    }
+  }
+  
   /** Populate properties using the information in an element of the items array
    * returned by API post ext/members/contact/?action=getListOfMembers for a
    * section in a particular term.
@@ -1550,7 +2227,7 @@ class Scout extends BaseObject
   public function ApiUseGetListOfMembers( \stdClass $apiItem ) {
     $this->firstName = $apiItem->firstname;
     $this->lastName = $apiItem->lastname;
-    $this->patrolId = $apiItem->patrolid;
+    $this->patrol = $this->section->Patrol( $apiItem->patrolid );
     assert( $this->section->id == $apiItem->sectionid );
     assert( $this->id == $apiItem->scoutid );
   }
@@ -1564,10 +2241,25 @@ class Scout extends BaseObject
    */
   public function BadgeWork( $badge ) {
     if (!array_key_exists( $badge->idv, $this->badgeWork )) {
-      $this->section->TermAt()->ApiGetBadgeRecords( $badge );
+      $this->Term()->ApiGetBadgeRecords( $badge );
       if (!array_key_exists( $badge->idv, $this->badgeWork )) $this->badgeWork[$badge->idv] = null;
     }
     return $this->badgeWork[$badge->idv];
+  }
+  
+  /** What Badges has this scout started (including completed badges)?
+   */
+  public function AllBadgeWork() {
+    if (!$this->badgeWorkComplete) {
+      if ($this->IsChildofUser()) {
+        $this->ApiBadgesGetSummary();
+      }
+      elseif ($this->section->HasBadgePermission()) {
+        $this->Term()->ApiBadgesByPerson();
+      }
+      else throw new \Exception( "You have not given Badges permission to this app in {$this->section}" );
+    }
+    return $this->badgeWork;
   }
 
   /** Remove references to other objects.
@@ -1579,6 +2271,7 @@ class Scout extends BaseObject
   public function BreakCache() {
     $this->osm = null;
     $this->section = null;
+    $this->badgeWork = array();
   }
 
   /** Can this scout skip the given requirement because enough other
@@ -1597,39 +2290,9 @@ class Scout extends BaseObject
     return false;
   }
 
-  /** Return the contents of a field within a particular contact.
-   *
-   * @param string $contactName  The name of the contact from which we wish to
-   *           read.  This can be one of:
-   *
-   *           $contactName           | refers to...
-   *           ---------------------- | -----------------------
-   *           contact_primary_member | Member
-   *           contact_primary_1      | Primary Contact
-   *           contact_primary_2      | Primary Contact 2
-   *           emergency              | Emergency Contact
-   *           standard_fields        | Essential Information
-   *           customisable_data      | Additional Information
-   *           floating               | Additional
-   *           consents               | Consents
-   *
-   * @param string $fieldName  The name of the field we want from the given
-   *           contact.  Not all contacts have the same field names (e.g. Member
-   *           doesn't have forename or surname as they are part of the basic
-   *           scout data.  Some common fields are: last_updated_time,
-   *           last_updated_by, lastname, address1, address2, address3,
-   *           address4, postcode, email1, email2, phone1 and phone2
-   */
-  public function ContactData( $contactName, $fieldName )
-  { $this->ApiCustomData();
-    if (!isset( $this->customData->{$contactName} )) return null;
-    if (!isset( $this->customData->{$contactName}->$fieldName)) return null;
-    return $this->customData->{$contactName}->$fieldName;
-  }
-
   /** Returns an email for a given contact.
    *
-   * @param \stdClass $contact  an object giving the data associated with a
+   * @param \stdClass|null $contact  an object giving the data associated with a
    *            particular contact of this scout.
    * @return string|null  An email address for the given contact, or null if no
    *           email was found (or the contact itself was null).
@@ -1649,9 +2312,9 @@ class Scout extends BaseObject
   public function ContactName() {
     if ($this->IsAdult()) return $this->Name();
     $contact = $this->PreferredContact();
-    if ($contact == null || !$contact->firstname) return "Parent of {$this}";
-    if (!$contact->lastname) return $contact->firstname . ' ' . $this->lastName;
-    return $contact->firstname . ' ' . $contact->lastname;
+    if ($contact == null || !$contact->firstName) return "Parent of {$this}";
+    if (!$contact->lastName) return $contact->firstName . ' ' . $this->lastName;
+    return $contact->firstName . ' ' . $contact->lastName;
   }
   
   /** Returns the date this scout started in it's associated section.
@@ -1671,23 +2334,22 @@ class Scout extends BaseObject
   public function Email() {
     $this->ApiCustomData();
     $preferred = $this->PreferredContact();
-    if ($this->IsAdult() && isset( $this->customData->contact_primary_member )) {
-      return $this->ContactEmail( $preferred ) ?:
-             $this->ContactEmail( $this->customData->contact_primary_member );
-    }
     return $this->ContactEmail( $preferred );
   }
 
-  /** The id of the scout's patrol.
+  /** Return some additional information (user-defined fields added for each
+   * scout in a section).
+   * It is normally possible to retrieve such fields as though they were
+   * properties of the scout, but that will not work if they have names which
+   * clash with standard properties.
    *
-   * If the patrolId is not known the API will be interrogated to find it.
+   * @param string $property  the name of the required field
    *
-   * @return int  the patrolId for this scout.  An Id of -2 indicates the Scout
-   *           is in the section's special 'leaders' patrol.
+   * @returns mixed  the value of the required field.
    */
-  private function getPatrolId() {
-    if ($this->patrolId === null) $this->ApiGetIndividual();
-    return $this->patrolId;
+  public function GetExtra( $property ) {
+    if ($this->extra->FieldEnabled( $property )) return $this->extra->$property;
+    return null;
   }
 
   /** Is the given email valid for this member?
@@ -1721,6 +2383,15 @@ class Scout extends BaseObject
     if ($work) return $work->HasMet( $requirement );
     return false;
   }
+  
+  /** Is this scout a child of the logged-in user (in the Parent Portal sense)?
+   */
+  public function IsChildOfUser() {
+    foreach ($this->osm->myChildren as $child) {
+      if ($child === $this) return true;
+    }
+    return false;
+  }
 
   /** Is this scout an adult?
    *
@@ -1728,8 +2399,17 @@ class Scout extends BaseObject
    *           or in an adult section.
    */
   public function IsAdult()
-  { if ($this->getPatrolId() == -2) return true;
+  { if (($this->patrol->id??0) == -2) return true;
     if ($this->section->type == 'adults') return true;
+    return false;
+  }
+  
+  /** Is this scout a Young Leader?
+   *
+   * @returns bool  true if this scout is in the young leaders patrol.
+   */
+  public function IsYoungLeader()
+  { if (($this->patrol->id??0) == -3) return true;
     return false;
   }
   
@@ -1748,29 +2428,77 @@ class Scout extends BaseObject
    */
   public function NameWithoutContactSurname() {
     $contact = $this->PreferredContact();
-    if ($contact && $contact->lastname && (stripos( $this->lastName, $contact->lastname ) !== false
-                                       || stripos( $contact->lastname, $this->lastName ) !== false))
+    if ($contact && $contact->lastName && (stripos( $this->lastName, $contact->lastName ) !== false
+                                       || stripos( $contact->lastName, $this->lastName ) !== false))
       return $this->firstName;
     return $this->Name();
   }
 
+  /** Gives the short name of this scout's patrol level
+   *
+   * @returns string  the short name of this scout's patrol level e.g. '2nd' or
+   *           'PL' depending upon the type of section and the level of the
+   *           scout.
+   */
+  public function PatrolLevelAbbr() {
+    if ($this->patrolLevel === null) $this->ApiGetIndividual();
+    return $this->section->PatrolLevelAbbr( $this->patrolLevel );
+  }
+
+  /** Gives the full name of this scout's patrol level
+   *
+   * @returns string  the full name of this scout's patrol level e.g. 'Seconder'
+   *           or 'Patrol Leader' depending upon the type of section and the
+   *           level of the scout.
+   */
+  public function PatrolLevelName() {
+    if ($this->patrolLevel === null) $this->ApiGetIndividual();
+    return $this->section->PatrolLevelName( $this->patrolLevel );
+  }
+
+  /** The name of the patrol this scout is in.
+   *
+   * @returns string  the name of the patrol.
+   */
+  public function PatrolName() {
+    if ($this->patrol === null) $this->ApiGetIndividual();
+    if ($this->patrol === null) return null;
+    return $this->patrol->name;
+  }
+
+  /** The URL of a photograph of this scout.
+   *
+   * @param bool $small  If this argument is given, and truthy, then a URL for a
+   *           small (100x100 pixel) photo will be returned.  Otherwise the URL
+   *           for a large (125x125 pixel) photo will be returned.
+   *
+   * @returns string  the desired URL, including the scheme and server.
+   */
+  public function PhotoUrl( bool $small = false ) {
+    $size = $small ? 100 : 125;
+     return 'https://www.onlinescoutmanager.co.uk/sites/' .
+            'onlinescoutmanager.co.uk/public/member_photos/' .
+            floor( $this->id/1000 ) .
+            "000/{$this->id}/{$this->photoGUID}/{$size}x{$size}_0.jpg";
+  }
+
   /** The preferred contact for the scout.
    *
-   * @return \stdClass|null  returns one of the primary contacts.  The method
+   * @return Contact|null  returns one of the primary contacts.  The method
    *           will prefer a contact with an email and, other things being
    *           equal, will prefer the first primary contact.
    */
   public function PreferredContact()
   { $this->ApiCustomData();
     if ($this->IsAdult()) {
-      $contact = $this->customData->contact_primary_1 ?? null;
+      $contact = $this->member;
       if ($this->ContactEmail($contact)) return $contact;
     }
-    $contact = $this->customData->contact_primary_1 ?? null;
+    $contact = $this->primary1;
     if ($this->ContactEmail($contact)) return $contact;
-    $contact = $this->customData->contact_primary_2 ?? null;
+    $contact = $this->primary2;
     if ($this->ContactEmail($contact)) return $contact;
-    return $this->customData->contact_primary_1 ?? null;
+    return $this->primary1;
   }
 
   /** The text associated with this scout's work towards this requirement.
@@ -1794,10 +2522,34 @@ class Scout extends BaseObject
    * @param string $lastName
    */
   public function SetName( $firstName, $lastName ) {
-    assert( !$this->firstName || $this->firstName == $firstName );
-    assert( !$this->lastName || $this->lastName == $lastName );
-    $this->firstName = $firstName;
-    $this->lastName = $lastName;
+    if ($firstName) {
+      assert( !$this->firstName || $this->firstName == $firstName );
+      $this->firstName = $firstName;
+    }
+    if ($lastName) {
+      assert( !$this->lastName  || $this->lastName == $lastName );
+      $this->lastName = $lastName;
+    }
+  }
+
+  /** Returns a term in which this scout was active.  The logged-in user must
+   * have leader access to the scout's section.
+   * @returns Term|null  the most recent term in which this scout was active, or
+   *           a future term if the scout was not active in a current or past
+   *           term, or null if the scout is not.
+   */
+  public function Term() {
+    if ($this->term === null) {
+      $terms = $this->section->Terms();
+      //echo "List of terms for $this is ", implode( ",", $terms ), "\n";
+      foreach ($this->section->Terms() as $term) {
+        if (array_key_exists( $this->id, $term->Scouts() )) {
+          $this->term = $term;
+          break;
+        }
+      }
+    }
+    return $this->term;
   }
 }
 
@@ -1807,39 +2559,40 @@ class Scout extends BaseObject
  * the permissions granted (by OSM) to the current user.  In particular,
  * a parent may have access to no more than the Id of a section.
  *
- * @property int|null $meetingDay.  The day of the week (1=Mon, 2=Tue, etc) on
- *           which the section holds its usual weekly meetings, or null if this
- *           has not been specified.
-
-    $this->portalBadges = $config->portal->badges == 1;
-    $this->portalEmail = $config->portal->emailbolton == 1;
-    $this->portalEvents = $config->portal->events == 1;
-    $this->portalPersonal = $config->portal->details == 1;
-    $this->portalProgramme = $config->portal->programme == 1;
- * @property bool $portalBadges.  True iff this section has subscribed to the
- *           add-on allowing parents to view badge progress.
- * @property bool $portalEmail.  True iff this section has subscribed to the
- *           add-on allowing leaders to send attachments with emails and to view
- *           sent emails.
- * @property bool $portalEvents.  True iff this section has subscribed to the
- *           add-on allowing leaders to invite parents to events and allowing
- *           parents to sign-up for events.
- * @property bool $portalPersonal.  True iff this section has subscribed to the
- *           add-on allowing parents to view and amend personal and contact
+ * @property-read bool $hasLeaderPermission  true iff the logged-in user has
+ *           leader access to this section.
+ * @property-read int|null $meetingDay.  The day of the week (1=Mon, 2=Tue, etc)
+ *           on which the section holds its usual weekly meetings, or null if
+ *           this has not been specified.
+ * @property-read bool $portalBadges.  True iff this section has subscribed to
+ *           the add-on allowing parents to view badge progress.
+ * @property-read bool $portalEmail.  True iff this section has subscribed to
+ *           the add-on allowing leaders to send attachments with emails and to
+ *           view sent emails.
+ * @property-read bool $portalEvents.  True iff this section has subscribed to
+ *           the add-on allowing leaders to invite parents to events and
+ *           allowing parents to sign-up for events.
+ * @property-read bool $portalPersonal.  True iff this section has subscribed to
+ *           the add-on allowing parents to view and amend personal and contact
  *           details.
- * @property bool $portalProgramme.  True iff this section has subscribed to the
- *           add-on allowing parents to see the programme. 
- * @property DateTime $registrationDate.  The date this section was first
+ * @property-read bool $portalProgramme.  True iff this section has subscribed
+ *           to the add-on allowing parents to see the programme. 
+ * @property-read DateTime $registrationDate.  The date this section was first
  *           registered on OSM.
- * @property DateTime $subscriptionExpires.  The date on which this section's
- *           current OSM subscription expires.
- * @property int $subscriptionLevel.  The level of OSM subscription for this
- *           section.  Possible values are 1, 2 or 3 for bronze, silver and gold
- *           respectively.
+ * @property-read DateTime $subscriptionExpires.  The date on which this
+ *           section's current OSM subscription expires.
+ * @property-read int $subscriptionLevel.  The level of OSM subscription for
+ *           this section.  Possible values are 1, 2 or 3 for bronze, silver and
+ *           gold respectively.
  */
 class Section extends BaseObject
 { /** @var int The Id by which this Section is known to the OSM API. */
   private $id;
+  
+  /** @var bool  true iff the API call GetPatrols has been made for this
+   *            section.
+   */
+  private $apiGotPatrols = false;
   
   /** @var $apiPermissions \stdClass|null  An object, like property permissions, but indicating the
    * permission the current application has been granted (by the current user) to this section.  A
@@ -1856,7 +2609,12 @@ class Section extends BaseObject
   /** @var string The name of the Group of which this section is a part. */
   private $groupName;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+  /** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
+   * property.
+   */
+  private $hasLeaderPermission = null;
+
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property, which may be null.
    * @var null|int
    */
@@ -1867,38 +2625,41 @@ class Section extends BaseObject
   
   /** @var OSM  the object through which we are accessing OSM. */
   private $osm;
+  
+  /** Array of Patrol objects for the patrols in this section. */
+  private $patrols = array();
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|bool
    */
   private $portalBadges = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|bool
    */
   private $portalEmail = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|bool
    */
   private $portalEvents = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|bool
    */
   private $portalPersonal = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|bool
    */
   private $portalProgramme = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|DateTime
    */
@@ -1910,13 +2671,13 @@ class Section extends BaseObject
    */
   private $scouts = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|DateTime
    */
   private $subscriptionExpires = null;
 
-	/** Set by UseApiGetUserRoles to the value of the corresponding virtual public
+	/** Set by ApiUseGetUserRoles to the value of the corresponding virtual public
    * property.
    * @var null|int
    */
@@ -1959,12 +2720,16 @@ class Section extends BaseObject
    * if the property is never used.
    *
    * @param string $property  The name of the property to fetch.
-   * @returns mixed
+   * @returns mixed  the value of the requested property (possibly after making
+   *           an API call to determine the value).
    */
   public function __get( $property ) {
     if (property_exists( self::class, $property ) && $this->{$property} !== null)
       return $this->{$property};
     switch ($property) {
+      case 'patrols':
+       if (!$this->apiGotPatrols) $this->ApiGetPatrols();
+       return $this->patrols;
       case 'groupId':
       case 'groupName':
       case 'meetingDay':
@@ -1978,12 +2743,126 @@ class Section extends BaseObject
     }
   }
   
-   /** Convert object to string (used wherever a Section is used in a context
-   * requiring a string).
+  /** Magic method to convert object to string (used wherever a Section is used
+   * in a context requiring a string).
    * @return string  simply returns the name of the section.
    */
  public function __toString()
   { return $this->name;
+  }
+ 
+  /** Interrogate API to find details of patrols in this section.
+   *
+   * A patrol may be created with no more information about it than it's ID and
+   * section.  This method will be called if a list of patrols is required, or
+   * if further detail is required about a patrol.
+   */  
+	public function ApiGetPatrols() {
+		if (!$this->apiGotPatrols) {
+      $apiData = $this->osm->PostAPI( 'users.php?action=getPatrols&sectionid='. $this->id );
+      foreach ($apiData->patrols as $apiPatrol) {
+        $patrol = $this->Patrol( $apiPatrol->patrolid );
+        $patrol->ApiUseGetPatrols( $apiPatrol );
+      }
+    }
+  }
+
+  /** Initialise the list of terms for this section
+   *
+   * This method should be called only from the ApiGetTerms method of class OSM.
+   * @param \stdClass[] $apiTerms  an array of objects, each having properties copied from the JSON
+   *           returned from the API.
+  */
+  public function ApiUseGetTerms( array $apiTerms )
+  { $this->terms = array();
+    foreach ($apiTerms as $apiTerm)
+    { $this->terms[] = new Term( $this, $apiTerm );
+    }
+  }
+
+  /** Populate properties of this section using information from a call to
+   * api.php?action=getUserRoles.
+   *
+   * @param \stdClass $apiObj  one of the objects returned by the API call.  See
+   *           below for a detailed description.
+   *
+   * @return void
+   */
+  public function ApiUseGetUserRoles( \stdClass $apiObj ) {
+    /* The parameter will have the following properties:
+       groupname string giving the name of the group containing the section
+       groupid   numeric string identifying the group.  This is the same for all sections
+                 within the same group but no further use within the API is known.
+       sectionid numeric string identifying the section.  Appears to be globally unique.
+       sectionname string giving name of section, as shown in OSM interface.
+       section   string identifying the section age-group.  Values seen are 'adults',
+                 'beavers', 'cubs', 'scouts' and 'waiting'.
+       isDefault string '0' or '1'.  Exactly one of the sections returned will have value
+                 '1': the section last used in the OSM web interface.
+       permissions   an object describing the permission levels for the current user in the section.
+                 See the description of method Permission for details of the property names and
+                 permitted values.  An absent property should be treated as zero.
+       regdate   string of form YYYY-MM-DD giving the date on which the section was first
+                 registered in OSM.
+       sectionConfig an object (see below) giving information mainly related to the level of
+                  subscription paid for.
+     The sectionConfig object has the following properties:
+       subscription_level  integer: 1=>Bronze, 2=>Silver, 3=>Gold
+       subscription_expires string of form YYYY-MM-DD giving expiry date of current
+                  subscription.
+       section_type  string apparently identical to the 'section' property of the section.
+       sectionType  string apparently identical to the 'section' property of the section.
+       parentSectionId  the only value observed is '0'.
+       hasUsedBadgeRecords  boolean.
+       subscription_active  boolean.  Note this may relate to automatic renewal being active
+                 rather than to the subscription actually being current.
+       subscription_lastExpires string of form YYYY-MM-DD.  Semantics unclear.
+       trial     an object, purpose unknown.  This property is not always present.
+       portal    an object with five integer properties specifying which parent portal options
+                 have been purchased.  1=>yes, 0=>no for events, programme, badges,
+                 (personal) details and emailbolton (for the Email system).  Two further
+                 properties 'emailAddress' and 'emailAddressCopy' give the from address and
+                 address for copies of all emails.
+       portalExpires an object with five string properties, with names like the integer
+                 properties of portal, containing the expiry dates of the parent portal
+                 subscriptions, together with five integer properties, named as the others
+                 but with an 'A' appended, whose purpose is unknown.
+       meeting_day  string giving the three-letter name of the section's usual meeting day.
+                 E.g. 'Thu'.  This doesn't seem to be editable in the web interface.
+       config_subscriptions_checked  string of form YYYY-MM-DD which appears usually to be
+                 set to today's date.
+  */
+    assert( $this->id == intval( $apiObj->sectionid ) );
+    $this->hasLeaderPermission = true; // Note logged-in user has Leader access to this section
+    //echo "Populating section {$apiObj->sectionname}<br/>\n";
+    $config = $apiObj->sectionConfig;
+    $this->groupId = intval( $apiObj->groupid );
+    $this->groupName = $apiObj->groupname;
+    $this->meetingDay = ['Mon'=>1, 'Tue'=>2, 'Wed'=>3, 'Thu'=>4, 'Fri'=>5,
+                        'Sat'=>6, 'Sun'=>7][$config->meeting_day??0] ?? null;
+    $this->name = $apiObj->sectionname;
+    $this->portalBadges = $config->portal->badges??0 == 1;
+    $this->portalEmail = $config->portal->emailbolton??0 == 1;
+    $this->portalEvents = $config->portal->events??0 == 1;
+    $this->portalPersonal = $config->portal->details??0 == 1;
+    $this->portalProgramme = $config->portal->programme??0 == 1;
+    $this->registrationDate = date_create( $apiObj->regdate );
+    $this->subscriptionLevel = $config->subscription_level;
+    $this->subscriptionExpires = date_create( $config->subscription_expires );
+    $this->type = $apiObj->section;
+    $this->userPermissions = $apiObj->permissions;
+  }
+
+  /** Use data from a MemberSearch API call to set properties of a section.
+   *
+   * @param stdClass $apiData  an element from the items array returned by the
+   *           MemberSearch API call.
+   */
+  public function ApiUseMemberSearch( \stdClass $apiData ) {
+    if ($this->type) assert( $this->type == $apiData->section_type );
+    $this->type = $apiData->section_type;
+    if ($this->name) assert( $this->name == $apiData->sectionname );
+    $this->name = $apiData->sectionname;
   }
 
   /** Remove references to other objects.
@@ -2052,10 +2931,26 @@ class Section extends BaseObject
    *           be represented by a different object in each section, all having
    *           the same scoutId.
    */
-  public function FindScout( int $scoutId )
-  { if (!isset( $this->scouts[$scoutId] ))
+  public function FindScout( $scoutId )
+  { if (is_string( $scoutId ) && is_numeric( $scoutId ))
+      $scoutId = intval( $scoutId );
+    assert( is_int( $scoutId ) );
+    if (!isset( $this->scouts[$scoutId] ))
       $this->scouts[$scoutId] = new Scout( $this, $scoutId );
     return $this->scouts[$scoutId];
+  }
+
+  /** Finds a scout by name in the current section
+  public function FindScoutByName( $firstName, $lastName = null, $when = null ) {
+    if ($when) {
+      $term = $this->TermAt( $when );
+      return $term->FindScoutByName( $firstName, $lastName );
+    }
+    foreach ($this->Terms() as $term) {
+      if ($scout = $term->FindScoutByName( $firstName, $lastName ))
+        return $scout;
+    }
+    return null;
   }
   
   /** Return full name (including Group) of section
@@ -2066,6 +2961,29 @@ class Section extends BaseObject
   { return $this->groupName . ': ' . $this->name;
   }
 
+  /** Has the current logged-in user permission to read badge information in
+   * this section?
+   *
+   * @returns bool  true if user can read badge information; false otherwise.
+   */   
+  public function HasBadgePermission() {
+    return $this->HasLeaderPermission() && $this->Permissions( "badge" ) > 0;
+  }
+
+  /** Does the current logged-in user have leader access (as opposed to parental
+   * access) to this section.
+   *
+   * @returns bool  true if user has a Leader's login; false if they have just a
+   *           parent's login.
+   */
+  public function HasLeaderPermission() {
+    if ($this->hasLeaderPermission === null) {
+      $this->hasLeaderPermission = false;
+      $this->osm->ApiGetUserRoles();
+    }
+    return $this->hasLeaderPermission;
+  }
+
   /** Return the OSM object which created this Section.
    *
    * @return OSM
@@ -2074,17 +2992,81 @@ class Section extends BaseObject
     return $this->osm;
   }
 
-	/** Get a list of patrols in this section.
-	 * 
-	 * @return Object
-	 */
-	public function Patrols() {
-		assert( false, "Not implemented yet" );
-    $patrols = $this->PostAPI( 'users.php?action=getPatrols&sectionid='. $this->id );
-    // alternatively, think about using:
-    // ext/settings/patrols/?action=get&sectionid=36850
-	}
+  /** Returns the patrol with the given id.
+   *
+   * Note that, while the patrol should be one which exists in OSM, this is not
+   * necessarily checked during this call and a non-existant id may not result
+   * in an error until an API call is prompted by an attempt to access its
+   * properties.
+   *
+   * @param $patrolId  This must be the id of a patrol which is defined for this
+   *           section, or a non-numeric value.
+   * 
+   * @returns Patrol|null  null is returned if the argument was not a valid
+   *           number.
+   */
+  public function Patrol( $patrolId ) {
+    if (!is_numeric( $patrolId )) return null;
+    if (!array_key_exists( $patrolId, $this->patrols ))
+      $this->patrols[$patrolId] = new Patrol( $patrolId, $this );
+    return $this->patrols[$patrolId];
+  }
 
+  /** Translate a patrol level code into an abbreviation.  Note that in an adult
+   * section, some patrol level codes (those for non-leader roles such as
+   * 'Chair') do not have abbreviations.
+   *
+   * Note that these abbreviations were harvested from the JavaScript returned
+   * by /ext/generic/startup/?action=getData called from head.js in the OSM web
+   * dashboard.  No API for fetching them is known.
+   *
+   * @param int $patrolLevel  the code used by OSM to represent a certain role
+   *           within a patrol, six, lodge or group.
+   * @returns string  the abbreviation for the role.
+   */
+  public function PatrolLevelAbbr( int $patrolLevel ) {
+    if ($patrolLevel == 0) return '';
+    $abbrs = array( 'adults' =>[1=>'AL',  2=>'SL', 3=>'YL',    4=>'SA', 5=>'OH',
+                                6=>'GSL', 7=>'',   8=>'',      9=>'',  10=>'',
+                               11=>'',   12=>'',  13=>'AGSL', 14=>''],
+                    'beavers'=>[1=>'ALL', 2=>'LL',  3=>'SLL'],
+                    'cubs'   =>[2=>'2nd', 3=>'6er', 3=>'S6er'],
+                    'scouts' =>[1=>'APL', 2=>'PL',  3=>'SPL']
+                    );
+    return $abbrs[$this->type][ $patrolLevel ] ?? '';
+  }
+  
+  /** Translate a patrol level code into a descriptive name.
+   *
+   * Note that these names were harvested from the JavaScript returned by
+   * /ext/generic/startup/?action=getData called from head.js in the OSM web
+   * dashboard.  No API for fetching them is known.
+   *
+   * @param int $patrolLevel  the code used by OSM to represent a certain role
+   *           within a patrol, six, lodge or group.
+   * @returns string  the abbreviation for the role.
+   */
+  public function PatrolLevelName( $patrolLevel ) {
+    // See comment in method PatrolLevelAbbr
+    $names = array( 'adults'=> [0=>'', 1=>'Assistant Leader',
+                                2=>'Section Leader', 3=>'Young Leader',
+                                4=>'Section Assistant', 5=>'Occasional Helper',
+                                6=>'Group Scout Leader', 7=>'Chair',
+                                8=>'Treasurer', 9=>'Secretary',
+                                10=>'Waiting List Coordinator',
+                                11=>'Quartermaster', 12=>'Fundraising Rep',
+                                13=>'Assistant Group Scout Leader',
+                                14=>'Parent Rep'],
+                    'beavers'=>[0=>'Normal', 1=>'Assistant Lodge Leader',
+                                2=>'Lodge Leader',  3=>'Senior Lodge Leader'],
+                    'cubs'   =>[0=>'Normal', 1=>'Seconder',
+                                2=>'Sixer',         3=>'Senior Sixer'],
+                    'scouts' =>[0=>'Normal', 1=>'Assistant Patrol Leader',
+                                2=>'Patrol Leader', 3=>'Senior Patrol Leader']
+                  );
+    return $names[$this->type][ $patrolLevel ] ?? '';
+  }
+  
   /** Returns level of permission the logged-in user has for the given section.
    *
    * @param string $area  one or more strings specifying areas of the API we may
@@ -2130,7 +3112,7 @@ class Section extends BaseObject
    * @returns Scout[] the scouts who are members in the current term.
    */
   public function Scouts() {
-    $term  = $this->TermAt();
+    $term = $this->TermAt();
     if ($term) {
       $scouts = $term->Scouts();
       return $scouts;
@@ -2140,145 +3122,64 @@ class Section extends BaseObject
 
   /** Returns all the terms defined for this section.
    *
-   * @return Term[int]
+   * @return Term[int] an array of terms defined for this section, sorted in
+   *           descending order of start date.
    */
   public function Terms()
   { if ($this->terms === null) $this->osm->ApiGetTerms();
     if ($this->terms === null) $this->terms = array();
+    usort( $this->terms,
+           function( $a, $b ) { 
+             $r = $a->startDate->getTimeStamp() - $b->startDate->getTimestamp();
+             if ($r !== 0) return $r;
+             return $b->endDate->getTimeStamp() - $a->endDate->getTimestamp();
+           } );
     return $this->terms;
+  }
+
+  /** Find the term having a given name
+   *
+   * @param string $name  the name of the term we are looking for.
+   *
+   * @returns the latest term having the given name.
+   */
+  public function FindTermByName( $name ) {
+    foreach ($this->Terms() as $term) {
+      if ($term->name == $name) return $term;
+    }
+    return null;
   }
   
   /** Get term (for this section) which covers the given date.
    *
    * @param \DateTime|null $day a date you want to find the term for.
    *
-   * @returns OSTTerm|null  a term including the given date, or as close to doing so as possible.
-   *           Null is returned only if there are no terms defined for this section.
+   * @returns OSTTerm|null  a term including the given date, or as close to
+   *           doing so as possible.  Null is returned only if there are no
+   *           terms defined for this section.
   */
-  public function TermAt( \DateTime $day = null ) {
+  public function TermAt( $day = null ) {
     $this->Terms();
+    if (is_string( $day )) $day = date_create( $day );
     $ts = $day ? $day->getTimestamp() : time();
-    //if ($day) echo "Target is {$day->format( 'j-M-Y' )}<br/>\n";
-    $bestTerm = null;
     foreach ($this->terms as $term) {
       if ($term->startDate->getTimestamp() <= $ts &&
           $term->endDate->getTimestamp() + 86400 > $ts) {
-        // $term includes the required date.  Now prefer it if it is shorter than any previously
-        // found term.
-        if ($bestTerm === null ||
-            $term->endDate->getTimestamp() - $term->startDate->getTimestamp() <
-                          $bestTerm->endDate->getTimestamp() - $bestTerm->startDate->getTimestamp())
-          $bestTerm = $term;
+        return $term;
       }
     }
-    if ($bestTerm) return $bestTerm;
 
-    // If no term spans the given date, choose the latest that starts before it
-    foreach ($this->terms as $term) {
-      if ($term->startDate->getTimestamp() <= $ts &&
-            ($bestTerm === null ||
-             $term->startDate->getTimestamp() > $bestTerm->startDate->getTimestamp()))
-        $bestTerm = $term;
-    }
-    if ($bestTerm) return $bestTerm;
-
-    // If no term starts before the given date, choose the earliest that starts after it
-    foreach ($this->terms as $term) {
-      if ($term->startDate->getTimestamp() > $ts &&
-            ($bestTerm === null ||
-             $term->startDate->getTimestamp() < $bestTerm->startDate->getTimestamp()))
-        $bestTerm = $term;
-    }
-    return $bestTerm;
-  }
-  
-  /** Initialise the list of terms for this section
-   *
-   * This method should be called only from the ApiGetTerms method of class OSM.
-   * @param \stdClass[] $apiTerms  an array of objects, each having properties copied from the JSON
-   *           returned from the API.
-  */
-  public function UseApiGetTerms( array $apiTerms )
-  { $this->terms = array();
-    foreach ($apiTerms as $apiTerm)
-    { $this->terms[] = new Term( $this, $apiTerm );
-    }
+    // If we don't have any terms defined... we just have to return null
+    if (count($this->terms) === 0) return null;
+    
+    // If the specified date is after the latest term, return the latest term
+    if ($ts > $this->terms[0]->startDate->getTimestamp())
+      return $this->terms[0];
+    
+    // Otherwise, return the earliest term
+    return end( $this->terms );
   }
 
-  /** Populate properties of this section using information from a call to
-   * api.php?action=getUserRoles.
-   *
-   * @param \stdClass $apiObj  one of the objects returned by the API call.  See
-   *           below for a detailed description.
-   *
-   * @return void
-   */
-  public function UseApiGetUserRoles( \stdClass $apiObj ) {
-    /* The parameter will have the following properties:
-       groupname string giving the name of the group containing the section
-       groupid   numeric string identifying the group.  This is the same for all sections
-                 within the same group but no further use within the API is known.
-       sectionid numeric string identifying the section.  Appears to be globally unique.
-       sectionname string giving name of section, as shown in OSM interface.
-       section   string identifying the section age-group.  Values seen are 'adults',
-                 'beavers', 'cubs', 'scouts' and 'waiting'.
-       isDefault string '0' or '1'.  Exactly one of the sections returned will have value
-                 '1': the section last used in the OSM web interface.
-       permissions   an object describing the permission levels for the current user in the section.
-                 See the description of method Permission for details of the property names and
-                 permitted values.  An absent property should be treated as zero.
-       regdate   string of form YYYY-MM-DD giving the date on which the section was first
-                 registered in OSM.
-       sectionConfig an object (see below) giving information mainly related to the level of
-                  subscription paid for.
-     The sectionConfig object has the following properties:
-       subscription_level  integer: 1=>Bronze, 2=>Silver, 3=>Gold
-       subscription_expires string of form YYYY-MM-DD giving expiry date of current
-                  subscription.
-       section_type  string apparently identical to the 'section' property of the section.
-       sectionType  string apparently identical to the 'section' property of the section.
-       parentSectionId  the only value observed is '0'.
-       hasUsedBadgeRecords  boolean.
-       subscription_active  boolean.  Note this may relate to automatic renewal being active
-                 rather than to the subscription actually being current.
-       subscription_lastExpires string of form YYYY-MM-DD.  Semantics unclear.
-       trial     an object, purpose unknown.  This property is not always present.
-       portal    an object with five integer properties specifying which parent portal options
-                 have been purchased.  1=>yes, 0=>no for events, programme, badges,
-                 (personal) details and emailbolton (for the Email system).  Two further
-                 properties 'emailAddress' and 'emailAddressCopy' give the from address and
-                 address for copies of all emails.
-       portalExpires an object with five string properties, with names like the integer
-                 properties of portal, containing the expiry dates of the parent portal
-                 subscriptions, together with five integer properties, named as the others
-                 but with an 'A' appended, whose purpose is unknown.
-       meeting_day  string giving the three-letter name of the section's usual meeting day.
-                 E.g. 'Thu'.  This doesn't seem to be editable in the web interface.
-       config_subscriptions_checked  string of form YYYY-MM-DD which appears usually to be
-                 set to today's date.
-  */
-    assert( $this->id == intval( $apiObj->sectionid ) );
-    //echo "Populating section {$apiObj->sectionname}<br/>\n";
-    //var_dump( $apiObj );
-    $config = $apiObj->sectionConfig;
-    //var_dump( $config );
-    $this->groupId = intval( $apiObj->groupid );
-    $this->groupName = $apiObj->groupname;
-    $this->meetingDay = ['Mon'=>1, 'Tue'=>2, 'Wed'=>3, 'Thu'=>4, 'Fri'=>5,
-                        'Sat'=>6, 'Sun'=>7][$config->meeting_day??0] ?? null;
-    $this->name = $apiObj->sectionname;
-    $this->portalBadges = $config->portal->badges??0 == 1;
-    $this->portalEmail = $config->portal->emailbolton??0 == 1;
-    $this->portalEvents = $config->portal->events??0 == 1;
-    $this->portalPersonal = $config->portal->details??0 == 1;
-    $this->portalProgramme = $config->portal->programme??0 == 1;
-    $this->registrationDate = date_create( $apiObj->regdate );
-    $this->subscriptionLevel = $config->subscription_level;
-    $this->subscriptionExpires = date_create( $config->subscription_expires );
-    $this->type = $apiObj->section;
-    $this->userPermissions = $apiObj->permissions;
-  }
- 
   /** Returns level of permission the logged-in user has for the given section.
    *
    * @param string $area  one or more strings specifying areas of OSM in which we are interested.
@@ -2397,15 +3298,32 @@ class Term extends BaseObject
     $this->endDate = date_create( $apiTerm->enddate );
   }
   
-   /** Convert object to string (used wherever a Term is used in a context
-   * requiring a string).
+  /** Magic method to convert object to string (used wherever a Term is used in
+   * a context requiring a string).
    * @return string  simply returns the name of the term.
    */
   public function __toString()
   { return $this->name;
   }
 
-  /** Get the list of members active in this section during this term
+  /** Call API endpoint badgesbyperson to get information about all badges held
+   * (or being worked on) by every scout active in this term.
+   * Note that detailed progress on each requirement is not fetched by this
+   * call.
+   */
+  public function ApiBadgesByPerson() {
+    $r = $this->osm->PostAPI( "ext/badges/badgesbyperson/" .
+                   "?action=loadBadgesByMember&section={$this->section->type}" .
+                        "&sectionid={$this->section->id}&term_id={$this->id}" );
+    foreach ($r->data as $apiScout) {
+      $scout = $this->section->FindScout( $apiScout->scoutid );
+      $scout->ApiUseBadgesByPerson( $apiScout );
+    }
+  }
+
+  /** Get the list of members active in this section during this term.
+   * @TODO Allow for calls with termid=-1 which I believe will return members
+   *       from all terms.
    */
   public function ApiGetListOfMembers()
   { if ($this->scouts === null) {
@@ -2413,10 +3331,9 @@ class Term extends BaseObject
       $r = $this->osm->PostAPI( "ext/members/contact/?action=getListOfMembers&sort=lastname" .
                                  "&sectionid={$this->section->id}&termid={$this->id}" .
                                  "&section={$this->section->type}" );
-      // echo "<h2>$this ApiGetListOfMembers</h2>\n"; var_dump( $r );
       if ($r) {
         foreach ($r->items as $apiItem ) {
-          $scout = $this->section->FindScout( (int) $apiItem->scoutid );
+          $scout = $this->section->FindScout( $apiItem->scoutid );
           $scout->ApiUseGetListOfMembers( $apiItem );
          $this->scouts[$scout->id] = $scout;
         }
@@ -2430,17 +3347,17 @@ class Term extends BaseObject
    */
   public function Badges( $type ) {
     if (!isset($this->badges[$type])) {
-      $this->badges[$type] = array();
       $r = $this->osm->PostAPI( "ext/badges/records/?action=getBadgeStructureByType" .
                                 "&section={$this->section->type}&type_id=$type" .
                                 "&term_id={$this->id}&section_id={$this->section->id}" );
-      //foreach ($r->structure as $struct) var_dump( $struct );
+      $badges = array();
       foreach ($r->details as $idv => $apiItem) {
         $badge = $this->osm->Badge( $idv );
         $apiTasks = $r->structure->$idv;
         $badge->ApiUseGetBadgeStructure( $apiItem, $apiTasks );
-        $this->badges[$type][$idv] = $badge;
+        $badges[$idv] = $badge;
       }
+      $this->badges[$type] = $badges;
     }
     return $this->badges[$type];
   }
@@ -2472,12 +3389,32 @@ class Term extends BaseObject
    * be more efficient.
    */
   public function BreakCache() {
-    $this->badges = array();
+    $this->badges = null;
     $this->osm = null;
     if ($this->scouts)
       foreach ($this->scouts as $scout) $scout->BreakCache();
     $this->scouts = null;
     $this->section = null;
+  }
+
+  /** Finds a scout, active in this term, with the given name.
+   *
+   * @param string|null $firstName  if non-empty, the method will search for a
+   *           scout with this first name.
+   * @param string|null $lastName  if non-empty, the method will search for a
+   *           scout with this last name.
+   *
+   * @return Scout|null  returns a scout, active in this term, whose name
+   *           matches the arguments, or null if no such scout can be found.
+   *           If there are multiple matches then one of them will be returned.
+   */
+  public function FindScoutByName( $firstName, $lastName ) {
+    foreach ($this->Scouts() as $scout) {
+      if (($firstName === null || $scout->firstName == $firstName) &&
+          ($lastName === null || $scout->lastName == $lastName))
+        return $scout;
+    }
+    return null;
   }
 
   /** Is the specified scout a member (of the term's section) during this term?
